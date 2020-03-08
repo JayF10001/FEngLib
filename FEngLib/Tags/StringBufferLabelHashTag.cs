@@ -10,7 +10,8 @@ namespace FEngLib.Tags
         {
         }
 
-        public override void Read(BinaryReader br, ushort length)
+        public override void Read(BinaryReader br, FrontendChunkBlock chunkBlock, FrontendPackage package,
+            ushort length)
         {
             Hash = br.ReadUInt32();
             Debug.WriteLine("LabelHash={0:X8}", Hash);
