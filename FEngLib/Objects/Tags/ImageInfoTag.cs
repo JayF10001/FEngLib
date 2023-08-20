@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 
 namespace FEngLib.Objects.Tags;
 
@@ -8,7 +8,18 @@ public class ImageInfoTag : ObjectTag
     {
     }
 
-    public uint ImageFlags { get; set; }
+	public override object Clone()
+	{
+		var result = new ImageInfoTag(null);
+
+		result.InternalClone(this);
+
+		result.ImageFlags = this.ImageFlags;
+
+		return result;
+	}
+
+	public uint ImageFlags { get; set; }
 
     public override void Read(BinaryReader br,
         ushort id,

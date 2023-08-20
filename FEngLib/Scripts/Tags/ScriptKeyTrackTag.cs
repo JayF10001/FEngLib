@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.IO;
 using FEngLib.Objects;
 
@@ -12,7 +12,22 @@ public class ScriptKeyTrackTag : ScriptTag
     {
     }
 
-    public byte ParamType { get; set; }
+	public override object Clone()
+	{
+		var result = new ScriptKeyTrackTag(null, null);
+
+		result.InternalClone(this);
+
+		result.ParamType = this.ParamType;
+		result.ParamSize = this.ParamSize;
+		result.InterpType = this.InterpType;
+		result.InterpAction = this.InterpAction;
+		result.Length = this.Length;
+
+		return result;
+	}
+
+	public byte ParamType { get; set; }
     public byte ParamSize { get; set; }
     public byte InterpType { get; set; }
     public byte InterpAction { get; set; }

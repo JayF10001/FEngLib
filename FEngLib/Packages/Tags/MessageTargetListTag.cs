@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using FEngLib.Chunks;
 using FEngLib.Tags;
 
@@ -8,7 +8,12 @@ public class MessageTargetListTag : Tag
 {
     public MessageTargets Targets { get; private set; }
 
-    public override void Read(BinaryReader br, ushort id,
+	public override object Clone()
+	{
+		return new MessageTargetListTag() { Targets = this.Targets?.Clone() as MessageTargets };
+	}
+
+	public override void Read(BinaryReader br, ushort id,
         ushort length)
     {
         if (length % 4 != 0)

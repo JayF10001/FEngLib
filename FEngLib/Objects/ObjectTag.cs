@@ -1,13 +1,20 @@
-﻿using FEngLib.Tags;
+using FEngLib.Tags;
 
 namespace FEngLib.Objects;
 
 public abstract class ObjectTag : Tag
 {
+	private IObject<ObjectData> m_frontendObject;
+
     protected ObjectTag(IObject<ObjectData> frontendObject)
     {
-        FrontendObject = frontendObject;
+		m_frontendObject = frontendObject;
     }
 
-    protected IObject<ObjectData> FrontendObject { get; }
+	protected void InternalClone(ObjectTag tag)
+	{
+		this.m_frontendObject = tag.m_frontendObject?.Clone() as IObject<ObjectData>;
+	}
+
+	protected IObject<ObjectData> FrontendObject => m_frontendObject;
 }

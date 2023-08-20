@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 
 namespace FEngLib.Objects.Tags;
 
@@ -8,7 +8,18 @@ public class StringBufferLabelTag : ObjectTag
     {
     }
 
-    public string Label { get; set; }
+	public override object Clone()
+	{
+		var result = new StringBufferLabelTag(null);
+
+		result.InternalClone(this);
+
+		result.Label = this.Label;
+
+		return result;
+	}
+
+	public string Label { get; set; }
 
     public override void Read(BinaryReader br,
         ushort id,

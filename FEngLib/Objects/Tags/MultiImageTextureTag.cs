@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 
 namespace FEngLib.Objects.Tags;
@@ -9,7 +9,16 @@ public class MultiImageTextureTag : ObjectTag
     {
     }
 
-    public override void Read(BinaryReader br, ushort id,
+	public override object Clone()
+	{
+		var result = new MultiImageTextureTag(null);
+
+		result.InternalClone(this);
+
+		return result;
+	}
+
+	public override void Read(BinaryReader br, ushort id,
         ushort length)
     {
         MultiImage multiImage = (MultiImage)FrontendObject;

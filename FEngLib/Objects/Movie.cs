@@ -1,4 +1,4 @@
-﻿namespace FEngLib.Objects;
+namespace FEngLib.Objects;
 
 public class Movie : BaseObject
 {
@@ -8,7 +8,16 @@ public class Movie : BaseObject
         Type = ObjectType.Movie;
     }
 
-    public override void InitializeData()
+	public override object Clone()
+	{
+		var result = new Movie(null);
+
+		result.InternalClone(this);
+
+		return result;
+	}
+
+	public override void InitializeData()
     {
         Data = new ObjectData();
     }

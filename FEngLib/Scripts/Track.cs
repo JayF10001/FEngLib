@@ -1,8 +1,10 @@
-﻿using System.Collections.Generic;
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using FEngLib.Objects;
 using FEngLib.Structures;
 using FEngLib.Utils;
 
@@ -28,7 +30,7 @@ public enum TrackInterpolationMethod : byte
     MoveToSpline = 0x4,
 }
 
-public interface ITrack
+public interface ITrack : ICloneable
 {
     public TrackInterpolationMethod InterpType { get; set; }
     public byte InterpAction { get; set; }
@@ -45,7 +47,16 @@ public interface ITrack<TValue> : ITrack where TValue : struct
 
 public abstract class Track : ITrack
 {
-    public TrackInterpolationMethod InterpType { get; set; }
+	protected void InternalClone(Track @object)
+	{
+		this.InterpType = @object.InterpType;
+		this.InterpAction = @object.InterpAction;
+		this.Length = @object.Length;
+	}
+
+	public abstract object Clone();
+
+	public TrackInterpolationMethod InterpType { get; set; }
     public byte InterpAction { get; set; }
     public uint Length { get; set; }
 
@@ -61,6 +72,18 @@ public abstract class Track<TValue> : Track, ITrack<TValue> where TValue : struc
     {
         DeltaKeys = new LinkedList<TrackNode<TValue>>();
     }
+
+	protected void InternalClone(Track<TValue> @object)
+	{
+		base.InternalClone(@object);
+
+		this.BaseKey = @object.BaseKey;
+
+		foreach (var item in @object.DeltaKeys)
+		{
+			this.DeltaKeys.AddLast(item?.Clone() as TrackNode<TValue>);
+		}
+	}
 
     public TValue BaseKey { get; set; }
     public LinkedList<TrackNode<TValue>> DeltaKeys { get; set; }
@@ -126,7 +149,16 @@ public class Vector2Track : Track<Vector2>
         return TrackParamType.Vector2;
     }
 
-    public override byte GetParamSize()
+	public override object Clone()
+	{
+		var result = new Vector2Track();
+
+		result.InternalClone(this);
+
+		return result;
+	}
+
+	public override byte GetParamSize()
     {
         return 8;
     }
@@ -149,7 +181,16 @@ public class Vector3Track : Track<Vector3>
         return TrackParamType.Vector3;
     }
 
-    public override byte GetParamSize()
+	public override object Clone()
+	{
+		var result = new Vector3Track();
+
+		result.InternalClone(this);
+
+		return result;
+	}
+
+	public override byte GetParamSize()
     {
         return 12;
     }
@@ -172,7 +213,16 @@ public class QuaternionTrack : Track<Quaternion>
         return TrackParamType.Quaternion;
     }
 
-    public override byte GetParamSize()
+	public override object Clone()
+	{
+		var result = new QuaternionTrack();
+
+		result.InternalClone(this);
+
+		return result;
+	}
+
+	public override byte GetParamSize()
     {
         return 16;
     }
@@ -200,7 +250,16 @@ public class ColorTrack : Track<Color4>
         return 16;
     }
 
-    protected override Color4 ReadKey(BinaryReader binaryReader)
+	public override object Clone()
+	{
+		var result = new ColorTrack();
+
+		result.InternalClone(this);
+
+		return result;
+	}
+
+	protected override Color4 ReadKey(BinaryReader binaryReader)
     {
         return binaryReader.ReadColor();
     }

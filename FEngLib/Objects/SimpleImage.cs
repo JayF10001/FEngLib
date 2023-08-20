@@ -1,4 +1,4 @@
-﻿namespace FEngLib.Objects;
+namespace FEngLib.Objects;
 
 public class SimpleImage : BaseObject
 {
@@ -7,7 +7,16 @@ public class SimpleImage : BaseObject
         Type = ObjectType.SimpleImage;
     }
 
-    public override void InitializeData()
+	public override object Clone()
+	{
+		var result = new SimpleImage(null);
+
+		result.InternalClone(this);
+
+		return result;
+	}
+
+	public override void InitializeData()
     {
         Data = new ObjectData();
     }

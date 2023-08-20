@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using FEngLib.Chunks;
 using FEngLib.Objects;
 
@@ -11,7 +11,16 @@ public class ScriptKeyNodeTag : ScriptTag
     {
     }
 
-    public override void Read(BinaryReader br,
+	public override object Clone()
+	{
+		var result = new ScriptKeyNodeTag(null, null);
+
+		result.InternalClone(this);
+
+		return result;
+	}
+
+	public override void Read(BinaryReader br,
         ushort id,
         ushort length)
     {

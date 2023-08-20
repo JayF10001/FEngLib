@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -19,10 +19,21 @@ namespace FEngLib;
 
 public class FrontendChunkWriter
 {
+	private readonly Dictionary<ResourceRequest, int> m_resourceMap;
+
     public FrontendChunkWriter(Package package)
     {
         Package = package;
-    }
+		m_resourceMap = new();
+
+		foreach (var request in package.ResourceRequests)
+		{
+			if (!this.m_resourceMap.ContainsKey(request))
+			{
+				this.m_resourceMap.Add(request, this.m_resourceMap.Count);
+			}
+		}
+	}
 
     public Package Package { get; }
 
@@ -44,7 +55,7 @@ public class FrontendChunkWriter
         {
             bw.Write(0x20000);
             bw.Write(0);
-            bw.Write(Package.ResourceRequests.Count);
+            bw.Write(this.m_resourceMap.Count);
             var rootObjCount = Package.Objects.Count(o => o.Parent == null);
             bw.Write(rootObjCount);
             bw.Write(Package.Name.Length + 1);
@@ -91,25 +102,31 @@ public class FrontendChunkWriter
     {
         writer.WriteChunk(ResourcesContainer, bw =>
         {
-            var nameOffsets = new uint[Package.ResourceRequests.Count];
+            var nameOffsets = new uint[this.m_resourceMap.Count];
 
             bw.WriteChunk(ResourceNames, bw =>
             {
-                for (var index = 0; index < Package.ResourceRequests.Count; index++)
-                {
-                    var resourceRequest = Package.ResourceRequests[index];
-                    nameOffsets[index] = (uint)bw.BaseStream.Position;
-                    bw.WriteCString(resourceRequest.Name);
-                }
+				foreach (var pair in this.m_resourceMap)
+				{
+					nameOffsets[pair.Value] = (uint)bw.BaseStream.Position;
+					bw.WriteCString(pair.Key.Name);
+				}
 
                 bw.AlignWriter(4);
             });
 
             bw.WriteChunk(ResourceRequests, bw =>
             {
-                bw.Write(Package.ResourceRequests.Count);
+                bw.Write(this.m_resourceMap.Count);
 
-                foreach (var (resourceRequest, nameOffset) in Package.ResourceRequests.Zip(nameOffsets))
+				var resources = new ResourceRequest[this.m_resourceMap.Count];
+
+				foreach (var pair in this.m_resourceMap)
+				{
+					resources[pair.Value] = pair.Key;
+				}
+
+                foreach (var (resourceRequest, nameOffset) in resources.Zip(nameOffsets))
                 {
                     bw.Write(resourceRequest.ID);
                     bw.Write(nameOffset);
@@ -158,7 +175,7 @@ public class FrontendChunkWriter
                             bw.WriteEnum(obj.Flags);
                             if (obj.ResourceRequest != null)
                             {
-                                bw.Write(Package.ResourceRequests.IndexOf(obj.ResourceRequest));
+                                bw.Write(this.m_resourceMap[obj.ResourceRequest]);
                             }
                             else
                             {

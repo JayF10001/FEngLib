@@ -1,5 +1,6 @@
-﻿using System.IO;
+using System.IO;
 using System.Numerics;
+using System.Xml.Linq;
 using FEngLib.Scripts;
 using FEngLib.Utils;
 
@@ -15,7 +16,26 @@ public class MultiImageData : ImageData
     public Vector2 BottomRight3 { get; set; }
     public Vector3 PivotRotation { get; set; }
 
-    public override void Read(BinaryReader br)
+	public override object Clone()
+	{
+		var result = new MultiImageData();
+
+		result.InternalClone(this);
+
+		result.TopLeft1 = this.TopLeft1;
+		result.TopLeft2 = this.TopLeft2;
+		result.TopLeft3 = this.TopLeft3;
+
+		result.BottomRight1 = this.BottomRight1;
+		result.BottomRight2 = this.BottomRight2;
+		result.BottomRight3 = this.BottomRight3;
+
+		result.PivotRotation = this.PivotRotation;
+
+		return result;
+	}
+
+	public override void Read(BinaryReader br)
     {
         base.Read(br);
 
@@ -44,7 +64,26 @@ public class MultiImageData : ImageData
 
 public class MultiImageScriptTracks : ImageScriptTracks
 {
-    public Vector2Track TopLeft1 { get; set; }
+	public override object Clone()
+	{
+		var result = new MultiImageScriptTracks();
+
+		result.InternalClone(this);
+
+		result.TopLeft1 = this.TopLeft1?.Clone() as Vector2Track;
+		result.TopLeft2 = this.TopLeft2?.Clone() as Vector2Track;
+		result.TopLeft3 = this.TopLeft3?.Clone() as Vector2Track;
+
+		result.BottomRight1 = this.BottomRight1?.Clone() as Vector2Track;
+		result.BottomRight2 = this.BottomRight2?.Clone() as Vector2Track;
+		result.BottomRight3 = this.BottomRight3?.Clone() as Vector2Track;
+
+		result.PivotRotation = this.PivotRotation?.Clone() as Vector3Track;
+
+		return result;
+	}
+
+	public Vector2Track TopLeft1 { get; set; }
     public Vector2Track TopLeft2 { get; set; }
     public Vector2Track TopLeft3 { get; set; }
     public Vector2Track BottomRight1 { get; set; }
@@ -60,7 +99,23 @@ public class MultiImage : Image<MultiImageData, ImageScript<MultiImageScriptTrac
         Type = ObjectType.MultiImage;
     }
 
-    public uint Texture1 { get; set; }
+	public override object Clone()
+	{
+		var result = new MultiImage(null);
+
+		result.InternalClone(this);
+
+		result.Texture1 = this.Texture1;
+		result.TextureFlags1 = this.TextureFlags1;
+		result.Texture2 = this.Texture2;
+		result.TextureFlags2 = this.TextureFlags2;
+		result.Texture3 = this.Texture3;
+		result.TextureFlags3 = this.TextureFlags3;
+
+		return result;
+	}
+
+	public uint Texture1 { get; set; }
     public uint TextureFlags1 { get; set; }
     public uint Texture2 { get; set; }
     public uint TextureFlags2 { get; set; }

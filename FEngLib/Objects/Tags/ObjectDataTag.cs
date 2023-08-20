@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 
 namespace FEngLib.Objects.Tags;
 
@@ -8,7 +8,16 @@ public class ObjectDataTag : ObjectTag
     {
     }
 
-    public override void Read(BinaryReader br,
+	public override object Clone()
+	{
+		var result = new ObjectDataTag(null);
+
+		result.InternalClone(this);
+
+		return result;
+	}
+
+	public override void Read(BinaryReader br,
         ushort id,
         ushort length)
     {

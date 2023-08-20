@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using FEngLib.Scripts;
 using FEngLib.Structures;
 using FEngLib.Utils;
@@ -12,7 +12,21 @@ public class ColoredImageData : ImageData
     public Color4 BottomRight { get; set; }
     public Color4 BottomLeft { get; set; }
 
-    public override void Read(BinaryReader br)
+	public override object Clone()
+	{
+		var result = new ColoredImageData();
+
+		result.InternalClone(this);
+
+		result.TopLeft = this.TopLeft;
+		result.TopRight = this.TopRight;
+		result.BottomRight = this.BottomRight;
+		result.BottomLeft = this.BottomLeft;
+
+		return result;
+	}
+
+	public override void Read(BinaryReader br)
     {
         base.Read(br);
         TopLeft = br.ReadColor();
@@ -33,7 +47,21 @@ public class ColoredImageData : ImageData
 
 public class ColoredImageScriptTracks : ImageScriptTracks
 {
-    public ColorTrack TopLeft { get; set; }
+	public override object Clone()
+	{
+		var result = new ColoredImageScriptTracks();
+
+		result.InternalClone(this);
+
+		result.TopLeft = this.TopLeft;
+		result.TopRight = this.TopRight;
+		result.BottomRight = this.BottomRight;
+		result.BottomLeft = this.BottomLeft;
+
+		return result;
+	}
+
+	public ColorTrack TopLeft { get; set; }
     public ColorTrack TopRight { get; set; }
     public ColorTrack BottomRight { get; set; }
     public ColorTrack BottomLeft { get; set; }
@@ -50,4 +78,13 @@ public class ColoredImage : Image<ColoredImageData, ImageScript<ColoredImageScri
     {
         Data = new ColoredImageData();
     }
+
+	public override object Clone()
+	{
+		var result = new ColoredImage(null);
+
+		result.InternalClone(this);
+
+		return result;
+	}
 }

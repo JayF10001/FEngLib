@@ -7,6 +7,15 @@ public class Group : BaseObject
         Type = ObjectType.Group;
     }
 
+    public override object Clone()
+    {
+        var result = new Group(null);
+
+        result.InternalClone(this);
+
+        return result;
+    }
+
     public override void InitializeData()
     {
         Data = new ObjectData();
