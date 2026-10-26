@@ -1,0 +1,242 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+namespace FEngLib.Assets;
+
+/// <summary>
+/// Read-only MW05 chunk-stream index. Unknown blocks are skipped by their declared length,
+/// never by searching their payload for signatures. Compressed blocks remain visible.
+/// </summary>
+public sealed class FngContainer
+{
+    public const uint FngChunkId = 0x00030203;
+    public const uint CompressedFngChunkId = 0x00030210;
+    private const uint FengMagic = 0xE76E4546;
+    private const uint PackageHeaderMagic = 0x64486B50;
+
+    private FngContainer(string path, long length, string sha256, int blockCount,
+        List<FngContainerEntry> entries)
+    {
+        SourcePath = path;
+        SourceLength = length;
+        SourceSha256 = sha256;
+        BlockCount = blockCount;
+        Entries = entries.AsReadOnly();
+    }
+
+    public string SourcePath { get; }
+    public long SourceLength { get; }
+    public string SourceSha256 { get; }
+    public int BlockCount { get; }
+    public IReadOnlyList<FngContainerEntry> Entries { get; }
+
+    public static FngContainer Open(string path)
+    {
+        path = Path.GetFullPath(path);
+        using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, true);
+        var sourceHash = Hash(stream);
+        stream.Position = 0;
+        var entries = new List<FngContainerEntry>();
+        var blockCount = 0;
+        while (stream.Position < stream.Length)
+        {
+            var offset = stream.Position;
+            if (stream.Length - offset < 8)
+                throw new InvalidDataException($"Truncated chunk header at 0x{offset:X}.");
+            var id = reader.ReadUInt32();
+            var length = reader.ReadUInt32();
+            if (offset == 0 && IsWholeFileWrapper(id))
+                throw new NotSupportedException("Whole-file compression / VPAK is not supported yet.");
+            var end = stream.Position + length;
+            if (end > stream.Length)
+                throw new InvalidDataException($"Chunk 0x{id:X8} at 0x{offset:X} exceeds file bounds.");
+            blockCount++;
+            if (id == FngChunkId || id == CompressedFngChunkId)
+                entries.Add(ReadEntry(reader, offset, id, length));
+            stream.Position = end;
+        }
+
+        return new FngContainer(path, stream.Length, sourceHash, blockCount, entries);
+    }
+
+    private static bool IsWholeFileWrapper(uint id)
+    {
+        return id is 0x5A4C444A or 0x46465548 or 0x57574152 or 0x4B504652 or 0x504D4F43 or 0x4B415056;
+    }
+
+    private static FngContainerEntry ReadEntry(BinaryReader reader, long offset, uint id, uint length)
+    {
+        var stream = reader.BaseStream;
+        var payloadOffset = offset + 8;
+        try
+        {
+            if (id == CompressedFngChunkId)
+                return CompressedEntry(reader, offset, id, length, payloadOffset + 4);
+            if (length < 4)
+                throw new InvalidDataException("Short FNG payload.");
+            var magic = reader.ReadUInt32();
+            if (magic == CompressedFngChunkId)
+                return CompressedEntry(reader, offset, id, length, payloadOffset + 12);
+            if (magic != FengMagic || length < 40)
+                throw new InvalidDataException("Missing FEng header.");
+            var fengLength = reader.ReadUInt32();
+            if ((long)fengLength + 8 > length || fengLength < 32)
+                throw new InvalidDataException("FEng length exceeds its containing block or is too short.");
+            if (reader.ReadUInt32() != PackageHeaderMagic)
+                throw new InvalidDataException("Missing MW05 PkHd header.");
+            var headerLength = reader.ReadUInt32();
+            if (headerLength < 24 || (long)headerLength + 8 > fengLength)
+                throw new InvalidDataException("Invalid PkHd length.");
+            if (reader.ReadUInt32() != 0x20000 || reader.ReadUInt32() != 0)
+                throw new InvalidDataException("Unsupported MW05 PkHd version.");
+            stream.Position += 8; // resource and root object counts
+            var nameLength = reader.ReadInt32();
+            var filenameLength = reader.ReadInt32();
+            if (nameLength < 2 || nameLength > 4096 || filenameLength < 1 ||
+                24L + nameLength + filenameLength > headerLength)
+                throw new InvalidDataException("Invalid package name / filename lengths.");
+            var nameBytes = reader.ReadBytes(nameLength);
+            if (nameBytes.Length != nameLength || nameBytes[nameLength - 1] != 0)
+                throw new InvalidDataException("Package name is not null-terminated.");
+            var name = new UTF8Encoding(false, true).GetString(nameBytes, 0, nameLength - 1);
+            if (!name.EndsWith(".fng", StringComparison.OrdinalIgnoreCase) || name.Any(char.IsControl))
+                throw new InvalidDataException("Invalid FNG package name.");
+            stream.Position = offset;
+            var hash = HashRange(stream, length + 8L);
+            return new FngContainerEntry(offset, id, length + 8L, name,
+                FngStorageKind.Uncompressed, null, hash);
+        }
+        catch (Exception error) when (error is InvalidDataException or DecoderFallbackException)
+        {
+            return new FngContainerEntry(offset, id, length + 8L, null,
+                FngStorageKind.Invalid, error.Message, null);
+        }
+    }
+
+    private static FngContainerEntry CompressedEntry(BinaryReader reader, long offset, uint id,
+        uint length, long codecOffset)
+    {
+        if (codecOffset + 16 > offset + 8L + length)
+            throw new InvalidDataException("Short compressed FNG wrapper.");
+        reader.BaseStream.Position = codecOffset;
+        var codec = Encoding.ASCII.GetString(reader.ReadBytes(4));
+        var known = codec is "JDLZ" or "HUFF" or "RAWW" or "RFPK" or "COMP";
+        return new FngContainerEntry(offset, id, length + 8L, null, FngStorageKind.Compressed,
+            known ? $"{codec}: decompression is not implemented yet." : "Unknown compressed FNG codec.", null);
+    }
+
+    /// <summary>
+    /// Extracts exact original blocks and SHA256 provenance. Refuses changed sources and existing
+    /// destinations. Source stays read-only; no decompression or model reserialization occurs.
+    /// </summary>
+    public IReadOnlyList<FngExtraction> Extract(IEnumerable<FngContainerEntry> selection, string directory)
+    {
+        var entries = selection.ToArray();
+        if (entries.Length == 0)
+            throw new InvalidOperationException("No extractable FNG entries selected.");
+        if (entries.Distinct().Count() != entries.Length || entries.Any(e => !Entries.Contains(e) || !e.CanExtract))
+            throw new InvalidOperationException("Selection contains duplicate, unsupported or foreign entries.");
+
+        directory = Path.GetFullPath(directory);
+        var paths = entries.Select(e => Path.Combine(directory, $"{e.Offset:X8}_{SafeName(e.Name)}")).ToArray();
+        foreach (var path in paths)
+            if (File.Exists(path) || Directory.Exists(path) || File.Exists(path + ".source.json") ||
+                Directory.Exists(path + ".source.json"))
+                throw new IOException($"Extraction destination already exists: {path}");
+
+        using var source = File.Open(SourcePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (source.Length != SourceLength || Hash(source) != SourceSha256)
+            throw new InvalidDataException("Source changed since scanning. Scan the container again.");
+
+        Directory.CreateDirectory(directory);
+        var created = new List<string>();
+        var results = new List<FngExtraction>();
+        try
+        {
+            for (var i = 0; i < entries.Length; i++)
+            {
+                var entry = entries[i];
+                var path = paths[i];
+                using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    created.Add(path);
+                    source.Position = entry.Offset;
+                    CopyRange(source, output, entry.StoredLength);
+                }
+                using (var output = File.OpenRead(path))
+                    if (Hash(output) != entry.Sha256)
+                        throw new InvalidDataException($"Extracted block failed SHA256 verification: {path}");
+
+                var result = new FngExtraction
+                {
+                    SourcePath = SourcePath, SourceLength = SourceLength, SourceSha256 = SourceSha256,
+                    Offset = entry.Offset, ChunkId = entry.ChunkId, StoredLength = entry.StoredLength,
+                    PackageName = entry.Name, OutputPath = path, ExtractedSha256 = entry.Sha256,
+                    ExtractedAt = DateTimeOffset.UtcNow
+                };
+                using (var metadata = new FileStream(path + ".source.json", FileMode.CreateNew, FileAccess.Write))
+                {
+                    created.Add(path + ".source.json");
+                    JsonSerializer.Serialize(metadata, result, new JsonSerializerOptions { WriteIndented = true });
+                }
+                results.Add(result);
+            }
+        }
+        catch
+        {
+            // Only remove files created by this extraction, never pre-existing files.
+            foreach (var path in created)
+            {
+                try { File.Delete(path); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            throw;
+        }
+        return results.AsReadOnly();
+    }
+
+    private static string SafeName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        return new string(name.Select(c => invalid.Contains(c) || c is '/' or '\\' ? '_' : c).ToArray());
+    }
+
+    private static string Hash(Stream stream)
+    {
+        using var sha = SHA256.Create();
+        return Convert.ToHexString(sha.ComputeHash(stream));
+    }
+
+    private static string HashRange(Stream stream, long length)
+    {
+        using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[65536];
+        while (length > 0)
+        {
+            var count = stream.Read(buffer, 0, (int)Math.Min(buffer.Length, length));
+            if (count == 0) throw new EndOfStreamException();
+            sha.AppendData(buffer, 0, count);
+            length -= count;
+        }
+        return Convert.ToHexString(sha.GetHashAndReset());
+    }
+
+    private static void CopyRange(Stream source, Stream destination, long length)
+    {
+        var buffer = new byte[65536];
+        while (length > 0)
+        {
+            var count = source.Read(buffer, 0, (int)Math.Min(buffer.Length, length));
+            if (count == 0) throw new EndOfStreamException();
+            destination.Write(buffer, 0, count);
+            length -= count;
+        }
+    }
+}

@@ -33,6 +33,7 @@ public partial class PackageView : Form
 	public PackageView()
 	{
 		InitializeComponent();
+		FileMenuItem.DropDownItems.Insert(1, new ToolStripMenuItem("Open container...", null, OpenContainerMenuItem_Click));
 		_packageViewExtensions = new PackageViewExtensions(this);
 		SetFormDetails();
 
@@ -65,7 +66,7 @@ public partial class PackageView : Form
 
 	private void PackageView_Load(object sender, EventArgs e)
 	{
-		var args = Environment.GetCommandLineArgs();
+		var args = Environment.GetCommandLineArgs().Skip(1).ToArray();
 
 		var opts = Parser.Default.ParseArguments<Options>(args);
 
@@ -479,6 +480,23 @@ public partial class PackageView : Form
 		}
 	}
 
+	private void OpenContainerMenuItem_Click(object sender, EventArgs e)
+	{
+		using var file = new OpenFileDialog { Filter = "MW05 containers (*.bun, *.lzc)|*.bun;*.lzc", CheckFileExists = true };
+		if (file.ShowDialog(this) != DialogResult.OK) return;
+		using var browser = new ContainerBrowser(file.FileName);
+		if (browser.ShowDialog(this) != DialogResult.OK) return;
+		try
+		{
+			LoadFile(browser.ExtractedPath);
+		}
+		catch (Exception error)
+		{
+			MessageBox.Show(this, $"FNG extracted, but the editor could not load it:\n{browser.ExtractedPath}\n\n{error.Message}",
+				"FNG load failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+		}
+	}
+
 	private void LoadFile(string path = null, bool fileIsJson = false)
 	{
 		Package package;
@@ -500,7 +518,7 @@ public partial class PackageView : Form
 		_packageViewExtensions.ObjectSelected = null;
 		_packageViewExtensions.ShouldCopyObject = false;
 		_packageViewExtensions.SearchIndex = -1;
-		viewOutput.Init(Path.Combine(Path.GetDirectoryName(path) ?? "", "textures"));
+		viewOutput.Init(Path.Combine(Path.GetDirectoryName(AppService.Instance.CurrentFileLoaded) ?? "", "textures"));
 
 		_currentPackage = package;
 		CurrentPackageWasModified();
@@ -1000,6 +1018,12 @@ public partial class PackageView : Form
 			details += $" | {AppService.Instance.CurrentFileLoaded}";
 
 		LblDetails.Text = details;
+		if (_currentPackage?.ResourceRequests.Any(r => r.Type is ResourceType.Image or ResourceType.MultiImage) == true)
+		{
+			var textureDirectory = Path.Combine(Path.GetDirectoryName(AppService.Instance.CurrentFileLoaded) ?? "", "textures");
+			if (!Directory.Exists(textureDirectory) || !Directory.EnumerateFiles(textureDirectory, "*.png").Any())
+				LblDetails.Text += $" | No preview PNGs: {textureDirectory}";
+		}
 
 		this.Text = $"FEngViewer";
 		if (_currentPackage is not null)

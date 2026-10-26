@@ -50,6 +50,9 @@ public class GLRenderTreeRenderer
 		if (!Directory.Exists(directory))
 			Directory.CreateDirectory(directory);
 
+        _resourceRequestToTexture.Clear();
+        foreach (var texture in _loadedTextures.Values)
+            texture.GLTexture.Destroy(_gl);
         _loadedTextures.Clear();
         foreach (var pngFile in Directory.GetFiles(directory, "*.png"))
         {

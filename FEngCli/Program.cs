@@ -21,7 +21,8 @@ internal static class Program
 		//args = @string.Split(' ', System.StringSplitOptions.RemoveEmptyEntries);
 
 		return Parser.Default
-			.ParseArguments(args, typeof(DecompileCommand), typeof(CompileCommand))
+			.ParseArguments(args, typeof(DecompileCommand), typeof(CompileCommand),
+				typeof(ScanContainerCommand), typeof(ExtractContainerCommand))
 			.MapResult((BaseCommand bc) => bc.Execute(), errs => 1);
 	}
 }

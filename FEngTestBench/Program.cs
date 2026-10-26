@@ -10,8 +10,15 @@ namespace FEngTestBench;
 
 internal static class Program
 {
-    private static void Main(string[] args)
+    private static int Main(string[] args)
     {
+        if (args.Length == 2 && args[0] == "--container-tests")
+            return ContainerTests.Run(args[1]);
+        if (args.Length != 1)
+        {
+            Console.Error.WriteLine("Usage: FEngTestBench <fng-directory> | --container-tests <output-directory>");
+            return 1;
+        }
         var stopwatch = Stopwatch.StartNew();
         var indir = args[0];
         Console.WriteLine("Running test bench on directory {0}", indir);
@@ -76,6 +83,7 @@ internal static class Program
         }
 
         Console.WriteLine("PASSED: {0}/{1} ({2}%)", matching, total, ((float)matching / total) * 100f);
+        return matching == total ? 0 : 1;
     }
 
     private static Package LoadPackageFromChunk(string path)

@@ -27,9 +27,6 @@ public class AppService
 
     public Package LoadFile(string path)
     {
-		CurrentFileLoaded = path;
-		IsJson = false;
-
         using var fs = new FileStream(path, FileMode.Open);
         using var fr = new BinaryReader(fs);
         var marker = fr.ReadUInt32();
@@ -50,14 +47,14 @@ public class AppService
         ms.Position = 0;
 
         using var mr = new BinaryReader(ms);
-        return _currentPackage = new FrontendPackageLoader(HashResolver).Load(mr);
+        var package = new FrontendPackageLoader(HashResolver).Load(mr);
+        CurrentFileLoaded = path;
+        IsJson = false;
+        return _currentPackage = package;
     }
 
 	public Package LoadJson(string path)
 	{
-		CurrentFileLoaded = path;
-		IsJson = true;
-
 		var package = JsonConvert.DeserializeObject<Package>(File.ReadAllText(path), new JsonSerializerSettings
 		{
 			Formatting = Formatting.Indented,
@@ -78,6 +75,8 @@ public class AppService
 				((Text)o).Label = HashResolver.ResolveNameHash(((Text)o).Label, ((Text)o).Hash);
 		});
 
+		CurrentFileLoaded = path;
+		IsJson = true;
 		return _currentPackage = package;
 	}
 
