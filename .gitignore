@@ -342,3 +342,7 @@ healthchecksdb
 /FEngCli/Properties/launchSettings.json
 
 !FEngLib/Packages/*
+
+# Local research workspace: reference source, notes, game assets and experiments.
+# See .local/README.md for the directory layout. Keep integrated code in the projects.
+/.local/
