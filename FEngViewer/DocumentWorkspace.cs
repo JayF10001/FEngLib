@@ -100,6 +100,9 @@ internal sealed class DocumentWorkspace
     /// <summary>The bound document changed; <c>null</c> means the editor must be cleared.</summary>
     public event EventHandler<WorkspaceDocument> ActiveChanged;
 
+    /// <summary>A document was saved to disk; the file is final and its hash can be recorded.</summary>
+    public event EventHandler<WorkspaceDocument> Saved;
+
     public IReadOnlyList<WorkspaceDocument> Documents => _documents;
     public IReadOnlyList<WorkspaceGroup> Groups => _groups;
     public IEnumerable<WorkspaceFile> Files => _groups.SelectMany(g => g.Files);
@@ -393,6 +396,7 @@ internal sealed class DocumentWorkspace
         if (!_prompts.WritePackage(document, path, isJson, offerOpenFolder: chooseTarget)) return false;
 
         document.MarkSaved(path, isJson);
+        Saved?.Invoke(this, document);
         StatusMessage = $"已保存 {Path.GetFileName(path)}";
         if (!PathEquals(previousPath, path) && TrackSavedCopy(previousPath, document))
             Changed?.Invoke(this, EventArgs.Empty);

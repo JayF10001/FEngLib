@@ -45,6 +45,12 @@ internal sealed class ContainerBrowser : Form
 
     public string ExtractionSummary { get; private set; }
 
+    /// <summary>The container this browser was opened on; the write-back session binds to it.</summary>
+    public string SourceContainerPath => _sourcePath;
+
+    /// <summary>Extraction output of the last successful run; null until then.</summary>
+    public string ExtractionOutputDirectory { get; private set; }
+
     public ContainerBrowser(string sourcePath, Func<string, IReadOnlyList<string>, string> importFiles)
     {
         _sourcePath = sourcePath;
@@ -328,6 +334,7 @@ internal sealed class ContainerBrowser : Form
             MessageBox.Show(this, error.Message, "Extract", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
+        ExtractionOutputDirectory = directory;
 
         SetBusy(true);
         try

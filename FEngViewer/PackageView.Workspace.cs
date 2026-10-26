@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Windows.Forms;
+using FEngLib.Assets;
 using FEngLib.Packages;
 using FEngRender.Data;
 
@@ -60,6 +61,7 @@ public partial class PackageView
     }
 
     private DocumentWorkspace _workspace;
+    private ContainerWriteBackCoordinator _writeBack;
     private DocumentTabBar _tabBar;
     private TreeView _workspaceTree;
     private Panel _leftStack;
@@ -87,6 +89,9 @@ public partial class PackageView
     private void InitializeWorkspace()
     {
         _workspace = new DocumentWorkspace(new WorkspacePrompts(this));
+        _writeBack = new ContainerWriteBackCoordinator();
+        _writeBack.PendingChanged += (_, _) => RefreshWorkspaceStructure();
+        _workspace.Saved += (_, document) => _writeBack.RecordSaved(document);
         _boldNodeFont = new Font(treeView1.Font, FontStyle.Bold);
 
         BuildShell();
@@ -318,6 +323,23 @@ public partial class PackageView
         _workspaceIcons.Images.Add("open", DrawStatusIcon(Color.FromArgb(46, 160, 67)));
         _workspaceIcons.Images.Add("active", DrawStatusIcon(Color.FromArgb(28, 105, 212)));
         _workspaceIcons.Images.Add("missing", DrawStatusIcon(Color.FromArgb(200, 60, 50)));
+        _workspaceIcons.Images.Add("pending", DrawPendingCheckIcon());
+    }
+
+    /// <summary>Green outline with a check mark: the file holds saved changes waiting for write-back.</summary>
+    private static Image DrawPendingCheckIcon()
+    {
+        var bitmap = new Bitmap(16, 16);
+        using var g = Graphics.FromImage(bitmap);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var outline = new Pen(Color.FromArgb(46, 160, 67), 1.6f);
+        g.DrawEllipse(outline, 3, 3, 10, 10);
+        using var check = new Pen(Color.FromArgb(46, 160, 67), 2f);
+        check.StartCap = LineCap.Round;
+        check.EndCap = LineCap.Round;
+        g.DrawLine(check, 5, 8, 7, 10);
+        g.DrawLine(check, 7, 10, 11, 5);
+        return bitmap;
     }
 
     private static Image DrawStatusIcon(Color color)
@@ -379,7 +401,10 @@ public partial class PackageView
         items.Add(new ToolStripSeparator());
         items.Add(CreateMenuItem("Save", Keys.Control | Keys.S, (_, _) => SaveActiveDocument(false)));
         items.Add(CreateMenuItem("Save as...", Keys.Control | Keys.Shift | Keys.S, (_, _) => SaveActiveDocument(true)));
+        items.Add(CreateMenuItem("Save all modified FNG", Keys.None, (_, _) => SaveAllModifiedDocuments()));
         items.Add(CreateMenuItem("Reload", Keys.Control | Keys.Shift | Keys.R, (_, _) => ReloadActiveDocument()));
+        items.Add(new ToolStripSeparator());
+        items.Add(CreateMenuItem("Write back current container copy...", Keys.None, (_, _) => WriteBackCurrentContainer()));
         items.Add(new ToolStripSeparator());
         items.Add(CreateMenuItem("Close tab", Keys.Control | Keys.W, (_, _) => CloseActiveDocument()));
         items.Add(CreateMenuItem("Close all tabs", Keys.Control | Keys.Shift | Keys.W, (_, _) => _workspace.CloseAll()));
@@ -701,14 +726,18 @@ public partial class PackageView
                 var files = group.Files.Where(file => MatchesWorkspaceFilter(file, filter)).ToList();
                 if (sortByName) files = files.OrderBy(file => file.Caption, StringComparer.OrdinalIgnoreCase).ToList();
                 if (files.Count == 0 && filter.Length > 0) continue;
-                var root = new TreeNode($"{group.Name} ({files.Count})")
+                var pendingInGroup = _writeBack?.PendingCount(group.Files) ?? 0;
+                var rootCaption = $"{group.Name} ({files.Count})" +
+                                  (pendingInGroup > 0 ? $"　· 待写回 {pendingInGroup}" : "");
+                var root = new TreeNode(rootCaption)
                 {
                     ImageKey = "group",
                     SelectedImageKey = "group",
-                    ToolTipText = $"{group.Name}：{group.Files.Count} 个 FNG"
+                    ToolTipText = $"{group.Name}：{group.Files.Count} 个 FNG" +
+                                  (pendingInGroup > 0 ? $"，{pendingInGroup} 个已保存待写回" : "")
                 };
                 _workspaceTree.Nodes.Add(root);
-                RememberNodeCaption(root, $"{group.Name} ({files.Count})");
+                RememberNodeCaption(root, rootCaption);
                 foreach (var file in files.Take(WorkspaceNodeLimit))
                 {
                     var caption = file.Caption;
@@ -809,12 +838,18 @@ public partial class PackageView
     {
         var document = _workspace.FindDocument(file.Path);
         var isActive = document != null && ReferenceEquals(document, _workspace.Active);
+        // The check mark means "saved changes pending write-back"; unsaved edits keep the
+        // existing open-state dot and the * suffix, so the two states never blend into one icon.
+        var pending = !file.IsMissing && document?.IsDirty != true &&
+                      _writeBack != null && _writeBack.IsPending(file.Path);
         node.ImageKey = node.SelectedImageKey = file.IsMissing ? "missing"
+            : pending ? "pending"
             : document == null ? "idle"
             : isActive ? "active" : "open";
         node.NodeFont = document == null ? null : _boldNodeFont;
         var tooltip = file.Caption + "\n" + file.Path;
         if (file.IsMissing) tooltip += "\n状态：文件缺失（红点）";
+        else if (pending) tooltip += "\n状态：有已保存修改，待写回容器副本（绿色勾）";
         else if (document == null) tooltip += "\n状态：未打开（灰点）";
         else if (isActive) tooltip += document.IsDirty ? "\n状态：当前文档，未保存（蓝点）" : "\n状态：当前文档（蓝点）";
         else tooltip += document.IsDirty ? "\n状态：已打开，未保存（绿点）" : "\n状态：已打开（绿点）";
@@ -1048,6 +1083,13 @@ public partial class PackageView
         using var browser = new ContainerBrowser(dialog.FileName, ImportExtractedFiles) { Icon = Icon };
         if (browser.ShowDialog(this) != DialogResult.OK) return;
         if (!string.IsNullOrWhiteSpace(browser.ExtractionSummary)) _workspace.StatusMessage = browser.ExtractionSummary;
+        if (browser.ExtractionOutputDirectory != null)
+        {
+            // The ledger registration is additive: re-extractions merge, nothing is lost.
+            var registration = _writeBack.RegisterAfterExtraction(
+                browser.SourceContainerPath, browser.ExtractionOutputDirectory);
+            _workspace.StatusMessage = $"{_workspace.StatusMessage}；{registration}";
+        }
         SetFormDetails();
     }
 
@@ -1060,6 +1102,174 @@ public partial class PackageView
         }
 
         _workspace.Save(_workspace.Active, chooseTarget);
+    }
+
+    /// <summary>
+    /// Batch save of every dirty document. Documents that fail (or get cancelled) stay dirty;
+    /// already-saved ones are not reset when a later save fails.
+    /// </summary>
+    private void SaveAllModifiedDocuments()
+    {
+        var dirty = _workspace.Documents.Where(d => d.IsDirty).ToList();
+        if (dirty.Count == 0)
+        {
+            _workspace.StatusMessage = "没有需要保存的文档";
+            return;
+        }
+
+        var saved = 0;
+        var failed = new List<string>();
+        foreach (var document in dirty)
+        {
+            if (_workspace.Save(document)) saved++;
+            else failed.Add(document.CaptionName);
+        }
+
+        _workspace.StatusMessage = $"保存全部：{saved}/{dirty.Count} 个已保存" +
+                                   (failed.Count > 0 ? $"，{failed.Count} 个未保存" : "");
+        if (failed.Count > 0)
+            MessageBox.Show(this,
+                "以下文档保存失败或被取消，仍保留未保存修改：\n" + string.Join("\n", failed),
+                "保存全部已修改 FNG", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    /// <summary>
+    /// Collects every saved-but-pending change of the active document's container (not just the
+    /// current tab), previews the plan, then publishes it to the working copy as one transaction.
+    /// </summary>
+    private void WriteBackCurrentContainer()
+    {
+        var document = _workspace.Active;
+        if (document == null)
+        {
+            MessageBox.Show(this, "当前没有打开的文档。", "写回容器副本", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var session = _writeBack.SessionForFile(document.FilePath);
+        if (session == null)
+        {
+            MessageBox.Show(this,
+                "当前文档没有容器写回会话（其所在目录没有 container.session.json）。\n" +
+                "只有从容器提取并登记过的 FNG 才能写回；来源不明的文件不能按名称猜测关联。",
+                "写回容器副本", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var unsaved = _workspace.Documents
+            .Where(d => d.IsDirty && SameDirectory(d.FilePath, session.SessionDirectory))
+            .ToList();
+        if (unsaved.Count > 0)
+        {
+            var answer = MessageBox.Show(this,
+                $"此容器还有 {unsaved.Count} 个 FNG 存在未保存修改：\n" +
+                string.Join("\n", unsaved.Select(d => "  " + d.Caption)) +
+                "\n\n先保存这些 FNG，再重新生成写回清单？",
+                "写回容器副本", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (answer != DialogResult.Yes)
+            {
+                _workspace.StatusMessage = "已取消容器写回（存在未保存修改）";
+                return;
+            }
+            foreach (var pending in unsaved)
+                if (!_workspace.Save(pending))
+                {
+                    _workspace.StatusMessage = "已取消容器写回：有 FNG 未能保存";
+                    return;
+                }
+        }
+
+        if (session.WorkingCopyPath == null)
+        {
+            using var copyDialog = new SaveFileDialog
+            {
+                Title = "选择工作副本保存位置（原始容器的完整副本，写回只修改它）",
+                Filter = "容器文件 (*.bun, *.lzc)|*.bun;*.lzc|所有文件 (*.*)|*.*",
+                FileName = Path.GetFileNameWithoutExtension(session.OriginalPath) +
+                           ".work" + Path.GetExtension(session.OriginalPath),
+                InitialDirectory = session.SessionDirectory
+            };
+            if (copyDialog.ShowDialog(this) != DialogResult.OK) return;
+            try
+            {
+                session.CreateWorkingCopy(copyDialog.FileName);
+                _workspace.StatusMessage = "工作副本已创建并校验：" + session.WorkingCopyPath;
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(this, "工作副本创建失败：\n" + error.Message,
+                    "写回容器副本", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+        }
+
+        ContainerWritePlan plan;
+        try
+        {
+            plan = ContainerWritePlanner.Build(session);
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, "生成写回计划失败：\n" + error.Message,
+                "写回容器副本", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        if (!plan.HasPendingChanges)
+        {
+            MessageBox.Show(this, "此容器当前没有待写回的已保存修改。", "写回容器副本",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using (var preview = new WriteBackPreviewDialog(plan))
+        {
+            if (preview.ShowDialog(this) != DialogResult.OK) return;
+        }
+
+        ContainerWriteBackReport report;
+        try
+        {
+            UseWaitCursor = true;
+            report = ContainerWriteBackExecutor.Execute(session, plan,
+                message => _workspace.StatusMessage = "容器写回：" + message);
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this,
+                "写回失败，工作副本保持原样（本次操作前已有备份可恢复）：\n" + error.Message,
+                "写回容器副本", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            _workspace.StatusMessage = "容器写回失败";
+            return;
+        }
+        finally
+        {
+            UseWaitCursor = false;
+        }
+
+        _writeBack.Invalidate(session);
+        _writeBack.NotifyPendingChanged();
+        var summary = report.LedgerComplete
+            ? $"容器写回成功：{report.Items.Count} 个 FNG 已写入工作副本，{report.VerifiedBlockCount} 个块验证通过"
+            : "容器写回已发布，但状态登记未完成，下次写回前会自动核对恢复";
+        if (report.Warnings.Count > 0) summary += "（" + string.Join("；", report.Warnings) + "）";
+        _workspace.StatusMessage = summary;
+        MessageBox.Show(this,
+            $"{summary}\n\n工作副本: {report.WorkingCopyPath}\n备份: {report.BackupPath}",
+            "写回容器副本", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private static bool SameDirectory(string left, string right)
+    {
+        try
+        {
+            return string.Equals(Path.GetDirectoryName(Path.GetFullPath(left)),
+                Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     private void ReloadActiveDocument()
