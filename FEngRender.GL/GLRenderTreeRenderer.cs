@@ -47,13 +47,14 @@ public class GLRenderTreeRenderer
 
     public void LoadTextures(string directory)
     {
-		if (!Directory.Exists(directory))
-			Directory.CreateDirectory(directory);
-
+        // Opening a document must not create a textures folder beside the imported FNG.
         _resourceRequestToTexture.Clear();
         foreach (var texture in _loadedTextures.Values)
             texture.GLTexture.Destroy(_gl);
         _loadedTextures.Clear();
+        if (!Directory.Exists(directory))
+            return;
+
         foreach (var pngFile in Directory.GetFiles(directory, "*.png"))
         {
             var filename = Path.GetFileNameWithoutExtension(pngFile) ?? "";

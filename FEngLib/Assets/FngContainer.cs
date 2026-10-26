@@ -132,11 +132,18 @@ public sealed class FngContainer
     }
 
     /// <summary>
-    /// Extracts exact original blocks and SHA256 provenance. Refuses changed sources and existing
-    /// destinations. Source stays read-only; no decompression or model reserialization occurs.
+    /// Extracts exact original blocks and SHA256 provenance, refusing existing destinations.
+    /// Source stays read-only; no decompression or model reserialization occurs.
     /// </summary>
     public IReadOnlyList<FngExtraction> Extract(IEnumerable<FngContainerEntry> selection, string directory)
+        => Extract(selection, directory, ExistingFilePolicy.Fail).Extracted;
+
+    /// <summary>Handles each FNG and its manifest as a pair when resolving file collisions.</summary>
+    public FngExtractionBatch Extract(IEnumerable<FngContainerEntry> selection, string directory, ExistingFilePolicy policy,
+        IProgress<FngExtractionProgress> progress = null)
     {
+        if (!Enum.IsDefined(typeof(ExistingFilePolicy), policy))
+            throw new ArgumentOutOfRangeException(nameof(policy));
         var entries = selection.ToArray();
         if (entries.Length == 0)
             throw new InvalidOperationException("No extractable FNG entries selected.");
@@ -145,31 +152,48 @@ public sealed class FngContainer
 
         directory = Path.GetFullPath(directory);
         var paths = entries.Select(e => Path.Combine(directory, $"{e.Offset:X8}_{SafeName(e.Name)}")).ToArray();
-        foreach (var path in paths)
-            if (File.Exists(path) || Directory.Exists(path) || File.Exists(path + ".source.json") ||
-                Directory.Exists(path + ".source.json"))
+        var skipped = new List<FngExtractionSkip>();
+        for (var i = 0; i < entries.Length; i++)
+        {
+            var path = paths[i];
+            if (string.Equals(path, SourcePath, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(path + ".source.json", SourcePath, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("The extraction destination must not replace the source container.");
+            if (Directory.Exists(path) || Directory.Exists(path + ".source.json"))
+                throw new IOException($"A directory occupies an extraction file path: {path}");
+            var exists = File.Exists(path) || File.Exists(path + ".source.json");
+            if (exists && policy == ExistingFilePolicy.Fail)
                 throw new IOException($"Extraction destination already exists: {path}");
+            if (exists && policy == ExistingFilePolicy.Skip) skipped.Add(new FngExtractionSkip(entries[i], path));
+        }
+        var skippedPaths = new HashSet<string>(skipped.Select(s => s.OutputPath), StringComparer.OrdinalIgnoreCase);
 
         using var source = File.Open(SourcePath, FileMode.Open, FileAccess.Read, FileShare.Read);
         if (source.Length != SourceLength || Hash(source) != SourceSha256)
             throw new InvalidDataException("Source changed since scanning. Scan the container again.");
 
-        Directory.CreateDirectory(directory);
-        var created = new List<string>();
         var results = new List<FngExtraction>();
+        if (skipped.Count == entries.Length) return new FngExtractionBatch(results, skipped, 0);
+
+        Directory.CreateDirectory(directory);
+        var staging = Path.Combine(directory, ".fng-extract-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(staging);
+        var transaction = new ExtractionTransaction();
+        var overwrittenCount = 0;
         try
         {
             for (var i = 0; i < entries.Length; i++)
             {
                 var entry = entries[i];
                 var path = paths[i];
-                using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                if (skippedPaths.Contains(path)) continue;
+                var staged = Path.Combine(staging, i + ".fng");
+                using (var output = new FileStream(staged, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 {
-                    created.Add(path);
                     source.Position = entry.Offset;
                     CopyRange(source, output, entry.StoredLength);
                 }
-                using (var output = File.OpenRead(path))
+                using (var output = File.OpenRead(staged))
                     if (Hash(output) != entry.Sha256)
                         throw new InvalidDataException($"Extracted block failed SHA256 verification: {path}");
 
@@ -180,26 +204,48 @@ public sealed class FngContainer
                     PackageName = entry.Name, OutputPath = path, ExtractedSha256 = entry.Sha256,
                     ExtractedAt = DateTimeOffset.UtcNow
                 };
-                using (var metadata = new FileStream(path + ".source.json", FileMode.CreateNew, FileAccess.Write))
+                using (var metadata = new FileStream(staged + ".source.json", FileMode.CreateNew, FileAccess.Write))
                 {
-                    created.Add(path + ".source.json");
                     JsonSerializer.Serialize(metadata, result, new JsonSerializerOptions { WriteIndented = true });
                 }
                 results.Add(result);
+                progress?.Report(new FngExtractionProgress(results.Count, entries.Length, entry, path));
+            }
+
+            for (var i = 0; i < entries.Length; i++)
+            {
+                var path = paths[i];
+                if (skippedPaths.Contains(path)) continue;
+                var staged = Path.Combine(staging, i + ".fng");
+                if (File.Exists(path) || File.Exists(path + ".source.json")) overwrittenCount++;
+                transaction.Publish(staged, path, policy == ExistingFilePolicy.Overwrite);
+                transaction.Publish(staged + ".source.json", path + ".source.json", policy == ExistingFilePolicy.Overwrite);
             }
         }
-        catch
+        catch (Exception error)
         {
-            // Only remove files created by this extraction, never pre-existing files.
-            foreach (var path in created)
+            try
             {
-                try { File.Delete(path); }
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
+                transaction.Rollback();
+            }
+            catch (AggregateException rollbackError)
+            {
+                throw new IOException($"Extraction failed and rollback was incomplete. Recovery files remain in: {staging}",
+                    new AggregateException(error, rollbackError));
+            }
+            try { ExtractionTransaction.Cleanup(staging); }
+            catch (Exception cleanupError) when (cleanupError is IOException or UnauthorizedAccessException)
+            {
+                throw new IOException($"Extraction failed; original files were restored. Temporary files remain in: {staging}", error);
             }
             throw;
         }
-        return results.AsReadOnly();
+        try { ExtractionTransaction.Cleanup(staging); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            throw new IOException($"Extraction completed, but temporary files could not be removed: {staging}", error);
+        }
+        return new FngExtractionBatch(results, skipped, overwrittenCount);
     }
 
     private static string SafeName(string name)

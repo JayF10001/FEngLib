@@ -62,12 +62,73 @@ internal static class ContainerTests
             }
             Reject<IOException>(() => container.Extract(container.Entries, Path.Combine(root, "extracted")), "Overwrote existing outputs.");
             Check(File.ReadAllBytes(source).SequenceEqual(data), "Extraction modified source.");
+
+            var firstPath = extracted[0].OutputPath;
+            var secondPath = extracted[1].OutputPath;
+            var edited = Encoding.ASCII.GetBytes("user-edited FNG working file");
+            File.WriteAllBytes(firstPath, edited);
+            File.WriteAllText(firstPath + ".source.json", "existing user metadata");
+            var skipAll = container.Extract(container.Entries, Path.Combine(root, "extracted"), ExistingFilePolicy.Skip);
+            Check(skipAll.Extracted.Count == 0 && skipAll.SkippedPaths.Count == 2, "All-existing skip did not complete successfully.");
+            Check(File.ReadAllBytes(firstPath).SequenceEqual(edited) &&
+                File.ReadAllText(firstPath + ".source.json") == "existing user metadata", "Skip changed existing working files.");
+            File.Delete(secondPath);
+            File.Delete(secondPath + ".source.json");
+            var mixed = container.Extract(container.Entries, Path.Combine(root, "extracted"), ExistingFilePolicy.Skip);
+            Check(mixed.Extracted.Count == 1 && mixed.SkippedPaths.Count == 1 && mixed.OverwrittenCount == 0,
+                "Mixed skip blocked extraction of missing entries.");
+            Check(File.ReadAllBytes(firstPath).SequenceEqual(edited) && File.ReadAllBytes(secondPath).SequenceEqual(fng),
+                "Mixed skip did not preserve edits and extract missing entries.");
+            var overwrite = container.Extract(container.Entries, Path.Combine(root, "extracted"), ExistingFilePolicy.Overwrite);
+            Check(overwrite.Extracted.Count == 2 && overwrite.SkippedPaths.Count == 0 && overwrite.OverwrittenCount == 2,
+                "Overwrite counts are incorrect.");
+            Check(File.ReadAllBytes(firstPath).SequenceEqual(fng) &&
+                JsonSerializer.Deserialize<FngExtraction>(File.ReadAllText(firstPath + ".source.json")).ExtractedSha256 == container.Entries[0].Sha256,
+                "Overwrite did not replace both FNG and provenance.");
+
+            File.Delete(firstPath);
+            var manifestOnly = container.Extract(new[] { container.Entries[0] }, Path.GetDirectoryName(firstPath), ExistingFilePolicy.Skip);
+            Check(manifestOnly.SkippedPaths.Count == 1 && !File.Exists(firstPath), "Skip created an FNG beside an existing orphan manifest.");
+            container.Extract(new[] { container.Entries[0] }, Path.GetDirectoryName(firstPath), ExistingFilePolicy.Overwrite);
+            Check(File.ReadAllBytes(firstPath).SequenceEqual(fng), "Overwrite failed to repair a manifest-only pair.");
+            File.Delete(firstPath + ".source.json");
+            var fngOnly = container.Extract(new[] { container.Entries[0] }, Path.GetDirectoryName(firstPath), ExistingFilePolicy.Skip);
+            Check(fngOnly.SkippedPaths.Count == 1 && !File.Exists(firstPath + ".source.json"), "Skip invented provenance for an existing FNG.");
+            container.Extract(new[] { container.Entries[0] }, Path.GetDirectoryName(firstPath), ExistingFilePolicy.Overwrite);
+
+            // A failure late in publication must restore earlier overwritten pairs and remove new files.
+            File.WriteAllBytes(firstPath, edited);
+            File.WriteAllText(firstPath + ".source.json", "restore this metadata");
+            using (var locked = new FileStream(secondPath + ".source.json", FileMode.Open, FileAccess.Read, FileShare.Read))
+                Reject<IOException>(() => container.Extract(container.Entries, Path.GetDirectoryName(firstPath), ExistingFilePolicy.Overwrite),
+                    "Overwrite unexpectedly replaced a locked manifest.");
+            Check(File.ReadAllBytes(firstPath).SequenceEqual(edited) && File.ReadAllText(firstPath + ".source.json") == "restore this metadata",
+                "Failed overwrite destroyed earlier edited files.");
+            Check(File.ReadAllBytes(secondPath).SequenceEqual(fng), "Failed overwrite did not restore the later FNG.");
+            Check(!Directory.EnumerateDirectories(Path.GetDirectoryName(firstPath), ".fng-extract-*").Any(), "Successful rollback left staging files.");
+            File.Delete(firstPath);
+            File.Delete(firstPath + ".source.json");
+            using (var locked = new FileStream(secondPath + ".source.json", FileMode.Open, FileAccess.Read, FileShare.Read))
+                Reject<IOException>(() => container.Extract(container.Entries, Path.GetDirectoryName(firstPath), ExistingFilePolicy.Overwrite),
+                    "New-file rollback fixture did not fail at the locked manifest.");
+            Check(!File.Exists(firstPath) && !File.Exists(firstPath + ".source.json"), "Failed batch left new files published.");
+
+            var directoryCollision = Path.Combine(root, "directory-collision");
+            Directory.CreateDirectory(Path.Combine(directoryCollision, Path.GetFileName(firstPath)));
+            foreach (var policy in new[] { ExistingFilePolicy.Skip, ExistingFilePolicy.Overwrite })
+                Reject<IOException>(() => container.Extract(container.Entries, directoryCollision, policy), "Treated a directory as an existing file.");
+            Reject<ArgumentOutOfRangeException>(() => container.Extract(container.Entries, root, (ExistingFilePolicy)99), "Accepted invalid collision policy.");
+            var selfSource = Save("00000000_Duplicate.fng", fng);
+            var selfContainer = FngContainer.Open(selfSource);
+            Reject<IOException>(() => selfContainer.Extract(selfContainer.Entries, root, ExistingFilePolicy.Overwrite), "Overwrote source container during extraction.");
+            Check(File.ReadAllBytes(selfSource).SequenceEqual(fng), "Source protection failed.");
             Reject<InvalidOperationException>(() => container.Extract(new[] { container.Entries[0], container.Entries[0] }, root), "Accepted duplicate selection.");
             var other = FngContainer.Open(source);
             Reject<InvalidOperationException>(() => container.Extract(other.Entries, root), "Accepted foreign entries.");
             data[data.Length - 1] ^= 1;
             File.WriteAllBytes(source, data);
             Reject<InvalidDataException>(() => container.Extract(container.Entries, Path.Combine(root, "changed")), "Accepted changed source with same size.");
+            Reject<InvalidDataException>(() => container.Extract(container.Entries, Path.Combine(root, "extracted"), ExistingFilePolicy.Skip), "Skip bypassed source fingerprint validation.");
             Check(!Directory.Exists(Path.Combine(root, "changed")), "Changed source created output directory.");
 
             var compressedPayload = new byte[20];

@@ -27,6 +27,13 @@ public class AppService
 
     public Package LoadFile(string path)
     {
+        var package = ReadFile(path);
+        ActivatePackage(package, path, false);
+        return package;
+    }
+
+    public Package ReadFile(string path)
+    {
         using var fs = new FileStream(path, FileMode.Open);
         using var fr = new BinaryReader(fs);
         var marker = fr.ReadUInt32();
@@ -48,12 +55,17 @@ public class AppService
 
         using var mr = new BinaryReader(ms);
         var package = new FrontendPackageLoader(HashResolver).Load(mr);
-        CurrentFileLoaded = path;
-        IsJson = false;
-        return _currentPackage = package;
+        return package;
     }
 
 	public Package LoadJson(string path)
+	{
+		var package = ReadJson(path);
+		ActivatePackage(package, path, true);
+		return package;
+	}
+
+	public Package ReadJson(string path)
 	{
 		var package = JsonConvert.DeserializeObject<Package>(File.ReadAllText(path), new JsonSerializerSettings
 		{
@@ -75,10 +87,15 @@ public class AppService
 				((Text)o).Label = HashResolver.ResolveNameHash(((Text)o).Label, ((Text)o).Hash);
 		});
 
-		CurrentFileLoaded = path;
-		IsJson = true;
-		return _currentPackage = package;
+		return package;
 	}
+
+    public void ActivatePackage(Package package, string path, bool isJson)
+    {
+        _currentPackage = package;
+        CurrentFileLoaded = path;
+        IsJson = isJson;
+    }
 
 	public Package ReloadFile()
 	{
@@ -87,7 +104,7 @@ public class AppService
 
 	public List<ResourceRequest> GetResourceRequests()
     {
-        return _currentPackage?.ResourceRequests ??
-               throw new NullReferenceException("Received a request for resource requests when no package is loaded!");
+        // No active document is a normal state now that documents live in the workspace.
+        return _currentPackage?.ResourceRequests ?? new List<ResourceRequest>();
     }
 }

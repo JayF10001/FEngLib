@@ -81,7 +81,7 @@ public sealed class ScanContainerCommand : BaseCommand
     }
 }
 
-[Verb("extract-container", HelpText = "Extract supported FNGs with source manifests; existing files are never overwritten.")]
+[Verb("extract-container", HelpText = "Extract supported FNGs with source manifests and an explicit collision policy.")]
 public sealed class ExtractContainerCommand : BaseCommand
 {
     [Option('i', "input", Required = true)] public string InputPath { get; set; }
@@ -89,11 +89,20 @@ public sealed class ExtractContainerCommand : BaseCommand
     public string OutputDirectory { get; set; }
     [Option("offset", HelpText = "Select one block by decimal or 0x-prefixed byte offset.")]
     public string Offset { get; set; }
+    [Option("existing", Default = "fail", HelpText = "Existing FNG/manifest handling: fail, skip, or overwrite.")]
+    public string ExistingFiles { get; set; } = "fail";
 
     public override int Execute()
     {
         try
         {
+            var policy = ExistingFiles.ToLowerInvariant() switch
+            {
+                "fail" => ExistingFilePolicy.Fail,
+                "skip" => ExistingFilePolicy.Skip,
+                "overwrite" => ExistingFilePolicy.Overwrite,
+                _ => throw new ArgumentException("--existing must be fail, skip, or overwrite.")
+            };
             var container = FngContainer.Open(InputPath);
             var entries = container.Entries.Where(e => e.CanExtract).ToArray();
             if (Offset != null)
@@ -106,8 +115,9 @@ public sealed class ExtractContainerCommand : BaseCommand
                 if (!entry.CanExtract) throw new NotSupportedException(entry.Diagnostic);
                 entries = new[] { entry };
             }
-            var results = container.Extract(entries, OutputDirectory);
-            foreach (var result in results) Console.WriteLine(result.OutputPath);
+            var results = container.Extract(entries, OutputDirectory, policy);
+            foreach (var result in results.Extracted) Console.WriteLine(result.OutputPath);
+            Console.Error.WriteLine($"Extracted {results.Extracted.Count}; skipped existing {results.SkippedPaths.Count}; overwritten {results.OverwrittenCount}.");
             var skipped = Offset == null ? container.Entries.Count(e => !e.CanExtract) : 0;
             if (skipped > 0) Console.Error.WriteLine($"Skipped {skipped} compressed / invalid FNG blocks. See scan-container report.");
             return skipped > 0 ? 2 : 0;

@@ -33,8 +33,8 @@ public partial class PackageView : Form
 	public PackageView()
 	{
 		InitializeComponent();
-		FileMenuItem.DropDownItems.Insert(1, new ToolStripMenuItem("Open container...", null, OpenContainerMenuItem_Click));
 		_packageViewExtensions = new PackageViewExtensions(this);
+		InitializeWorkspace();
 		SetFormDetails();
 
 		var imageList = new ImageList();
@@ -70,8 +70,23 @@ public partial class PackageView : Form
 
 		var opts = Parser.Default.ParseArguments<Options>(args);
 
-		opts.WithParsed(parsed => LoadFile(parsed.InputFile, false))
+		opts.WithParsed(parsed => OpenStartupFile(parsed.InputFile))
 			.WithNotParsed(err => Application.Exit());
+	}
+
+	private void OpenStartupFile(string path)
+	{
+		if (string.IsNullOrWhiteSpace(path))
+			return;
+
+		if (!File.Exists(path))
+		{
+			MessageBox.Show(this, $"找不到文件：\n{path}", "FEngViewer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+			return;
+		}
+
+		var isJson = path.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+		ImportAndOpen(new[] { path }, isJson, activateAll: false);
 	}
 
 	[UsedImplicitly]
@@ -303,23 +318,22 @@ public partial class PackageView : Form
 		}
 	}
 
-	private void SavePackageToChunk(string path)
+	private void SavePackageToChunk(Package package, string path)
 	{
-		using var bw = new BinaryWriter(File.Create(path));
-
 		using var tms = new MemoryStream();
 		using var tbw = new BinaryWriter(tms);
-		new FrontendChunkWriter(_currentPackage).Write(tbw);
+		new FrontendChunkWriter(package).Write(tbw);
 		tms.Position = 0;
+		using var bw = new BinaryWriter(File.Create(path));
 
 		bw.Write(0x30203);
 		bw.Write((uint)tms.Length);
 		tms.CopyTo(bw.BaseStream);
 	}
 
-	private void SavePackageToJson(string path)
+	private void SavePackageToJson(Package package, string path)
 	{
-		File.WriteAllText(path, JsonConvert.SerializeObject(_currentPackage, new JsonSerializerSettings
+		File.WriteAllText(path, JsonConvert.SerializeObject(package, new JsonSerializerSettings
 		{
 			Formatting = Formatting.Indented,
 			Converters = new List<JsonConverter>
@@ -366,7 +380,10 @@ public partial class PackageView : Form
 
 	private void treeView1_AfterSelect(object sender, TreeViewEventArgs e)
 	{
-		if (e.Node == _rootNode)
+		if (_currentPackage == null)
+			return;
+
+		if (e.Node == _rootNode && _rootNode != null)
 		{
 			LblChildsCount.Text = "Children: " + _currentPackage.Objects.Where(x => x.Parent == null).Count().ToString("D5") + " | Total: " + CountChildren(null);
 		}
@@ -420,6 +437,8 @@ public partial class PackageView : Form
 			return;
 		}
 
+		if (_currentRenderTree == null)
+			return;
 
 		bool WithinBounds(RenderTreeNode node, float x, float y)
 		{
@@ -457,125 +476,6 @@ public partial class PackageView : Form
 			// if linq stuff didn't find anything -
 			// ignored
 		}
-	}
-
-	private void OpenFileMenuItem_Click(object sender, EventArgs e)
-	{
-		var ofd = new OpenFileDialog();
-		ofd.Filter = "FNG Files (*.fng, *.bin)|*.fng;*.bin|JSON Files (*.json)|*.json";
-		ofd.CheckFileExists = true;
-		if (ofd.ShowDialog() == DialogResult.OK)
-		{
-			switch (ofd.FilterIndex)
-			{
-				case 1:
-					LoadFile(ofd.FileName, false);
-					break;
-				case 2:
-					LoadFile(ofd.FileName, true);
-					break;
-				default:
-					throw new ArgumentOutOfRangeException(nameof(ofd.FilterIndex));
-			}
-		}
-	}
-
-	private void OpenContainerMenuItem_Click(object sender, EventArgs e)
-	{
-		using var file = new OpenFileDialog { Filter = "MW05 containers (*.bun, *.lzc)|*.bun;*.lzc", CheckFileExists = true };
-		if (file.ShowDialog(this) != DialogResult.OK) return;
-		using var browser = new ContainerBrowser(file.FileName);
-		if (browser.ShowDialog(this) != DialogResult.OK) return;
-		try
-		{
-			LoadFile(browser.ExtractedPath);
-		}
-		catch (Exception error)
-		{
-			MessageBox.Show(this, $"FNG extracted, but the editor could not load it:\n{browser.ExtractedPath}\n\n{error.Message}",
-				"FNG load failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
-		}
-	}
-
-	private void LoadFile(string path = null, bool fileIsJson = false)
-	{
-		Package package;
-		if (string.IsNullOrWhiteSpace(path))
-		{
-			if (_currentPackage is null)
-				return;
-
-			package = AppService.Instance.ReloadFile();
-		}
-		else
-		{
-			if (fileIsJson)
-				package = AppService.Instance.LoadJson(path);
-			else
-				package = AppService.Instance.LoadFile(path);
-		}
-
-		_packageViewExtensions.ObjectSelected = null;
-		_packageViewExtensions.ShouldCopyObject = false;
-		_packageViewExtensions.SearchIndex = -1;
-		viewOutput.Init(Path.Combine(Path.GetDirectoryName(AppService.Instance.CurrentFileLoaded) ?? "", "textures"));
-
-		_currentPackage = package;
-		CurrentPackageWasModified();
-	}
-
-	private void SaveFileMenuItem_Click(object sender, EventArgs e)
-	{
-		if (_currentPackage is null)
-			return;
-
-		var sfd = new SaveFileDialog();
-		sfd.Filter = "FNG Files (*.fng)|*.fng|BIN Files (*.bin)|*.bin|JSON Files (*.json)|*.json";
-		sfd.FileName = Path.GetFileNameWithoutExtension(_currentPackage?.Name);
-		sfd.AddExtension = true;
-		if (sfd.ShowDialog() == DialogResult.OK)
-		{
-			switch (sfd.FilterIndex)
-			{
-				case 1:
-				case 2:
-					SaveFile(sfd.FileName, false);
-					break;
-				case 3:
-					SaveFile(sfd.FileName, true);
-					break;
-				default:
-					throw new ArgumentOutOfRangeException(nameof(sfd.FilterIndex));
-			}
-		}
-	}
-
-	private void CleanupAndSaveToolStripMenuItem_Click(object sender, EventArgs e)
-	{
-		foreach (var fngObject in _currentPackage.Objects.Where(c => !string.IsNullOrWhiteSpace(c.Name)))
-		{
-			fngObject.Name = null;
-		}
-
-		SaveFileMenuItem_Click(sender, e);
-	}
-
-	private void ReloadFileMenuItem_Click(object sender, EventArgs e)
-	{
-		LoadFile();
-	}
-
-	private void SaveFile(string path, bool fileIsJson)
-	{
-		if (string.IsNullOrWhiteSpace(path))
-			return;
-
-		if (fileIsJson)
-			SavePackageToJson(path);
-		else
-			SavePackageToChunk(path);
-
-		OpenRecentlySaved(path, fileIsJson);
 	}
 
 	public static IEnumerable<TreeNode> FlattenTree(TreeView tv)
@@ -619,14 +519,23 @@ public partial class PackageView : Form
 
 	private void CurrentPackageWasModified(string treeKey = null)
 	{
+		if (_currentPackage == null)
+			return;
+
+		var document = _workspace.Active;
+		_workspace.MarkDirty(document);
 		_currentRenderTree = RenderTree.Create(_currentPackage);
+		if (document != null) _documentTrees[document] = new RenderCache(_currentRenderTree, document.ModelVersion);
 		PopulateTreeView(_currentPackage, _currentRenderTree);
 
 		if (!string.IsNullOrWhiteSpace(treeKey))
 		{
 			var foundNodes = treeView1.Nodes.Find(treeKey, true);
-			treeView1.SelectedNode = foundNodes.First();
-			treeView1.SelectedNode.Expand();
+			if (foundNodes.Length > 0)
+			{
+				treeView1.SelectedNode = foundNodes.First();
+				treeView1.SelectedNode.Expand();
+			}
 			treeView1.Focus();
 		}
 		else
@@ -635,7 +544,6 @@ public partial class PackageView : Form
 		}
 		Render();
 
-		// window title
 		SetFormDetails();
 	}
 
@@ -917,6 +825,12 @@ public partial class PackageView : Form
 			_packageViewExtensions.SearchText = TxtSearch.Text;
 			_packageViewExtensions.SearchIndex = -1;
 		}
+
+		if (_workspace?.Active != null)
+		{
+			_workspace.Active.SearchText = TxtSearch.Text;
+			_workspace.Active.SearchIndex = _packageViewExtensions.SearchIndex;
+		}
 	}
 
 	private void moveUpToolStripMenuItem_Click(object sender, EventArgs e)
@@ -1009,29 +923,6 @@ public partial class PackageView : Form
 		baseObject.Scripts[currentItemIndex] = unrelatedScript;
 
 		CurrentPackageWasModified(PackageViewExtensions.GetObjectTreeKey(selectedObject));
-	}
-
-	private void SetFormDetails()
-	{
-		var details = $"{DateTimeOffset.Now:dd/MM/yyyy HH:mm:ss}";
-		if (!string.IsNullOrWhiteSpace(AppService.Instance.CurrentFileLoaded))
-			details += $" | {AppService.Instance.CurrentFileLoaded}";
-
-		LblDetails.Text = details;
-		if (_currentPackage?.ResourceRequests.Any(r => r.Type is ResourceType.Image or ResourceType.MultiImage) == true)
-		{
-			var textureDirectory = Path.Combine(Path.GetDirectoryName(AppService.Instance.CurrentFileLoaded) ?? "", "textures");
-			if (!Directory.Exists(textureDirectory) || !Directory.EnumerateFiles(textureDirectory, "*.png").Any())
-				LblDetails.Text += $" | No preview PNGs: {textureDirectory}";
-		}
-
-		this.Text = $"FEngViewer";
-		if (_currentPackage is not null)
-			this.Text += $" - {_currentPackage.Name}";
-
-#if DEBUG
-		Text += $" - Debug";
-#endif
 	}
 
 	private void orderGroupToolStripMenu_Click(object sender, EventArgs e)

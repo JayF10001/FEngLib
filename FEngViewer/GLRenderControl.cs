@@ -24,8 +24,8 @@ public partial class GLRenderControl : UserControl, IRenderControl
 
     public RenderTreeNode SelectedNode
     {
-        get => _renderer.SelectedNode;
-        set => _renderer.SelectedNode = value;
+        get => _renderer?.SelectedNode;
+        set { if (_renderer != null) _renderer.SelectedNode = value; }
     }
         
     public void Init(string textureDir)
@@ -48,6 +48,8 @@ public partial class GLRenderControl : UserControl, IRenderControl
     {
         if (_renderTree != null)
             _renderer.Render(_renderTree);
+        else
+            openglControl1.OpenGL.Clear(SharpGL.OpenGL.GL_COLOR_BUFFER_BIT | SharpGL.OpenGL.GL_DEPTH_BUFFER_BIT);
     }
 
     private void openglControl1_MouseMove(object sender, MouseEventArgs e)
