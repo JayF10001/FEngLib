@@ -65,12 +65,13 @@ public sealed class FngContainer
         return new FngContainer(path, stream.Length, sourceHash, blockCount, entries);
     }
 
-    private static bool IsWholeFileWrapper(uint id)
+    internal static bool IsWholeFileWrapper(uint id)
     {
         return id is 0x5A4C444A or 0x46465548 or 0x57574152 or 0x4B504652 or 0x504D4F43 or 0x4B415056;
     }
 
-    private static FngContainerEntry ReadEntry(BinaryReader reader, long offset, uint id, uint length)
+    /// <summary>Shared with <see cref="ContainerBlockIndex"/> so both scanners classify blocks identically.</summary>
+    internal static FngContainerEntry ReadEntry(BinaryReader reader, long offset, uint id, uint length)
     {
         var stream = reader.BaseStream;
         var payloadOffset = offset + 8;
@@ -254,13 +255,13 @@ public sealed class FngContainer
         return new string(name.Select(c => invalid.Contains(c) || c is '/' or '\\' ? '_' : c).ToArray());
     }
 
-    private static string Hash(Stream stream)
+    internal static string Hash(Stream stream)
     {
         using var sha = SHA256.Create();
         return Convert.ToHexString(sha.ComputeHash(stream));
     }
 
-    private static string HashRange(Stream stream, long length)
+    internal static string HashRange(Stream stream, long length)
     {
         using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var buffer = new byte[65536];
