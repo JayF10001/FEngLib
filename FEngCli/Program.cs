@@ -22,7 +22,9 @@ internal static class Program
 
 		return Parser.Default
 			.ParseArguments(args, typeof(DecompileCommand), typeof(CompileCommand),
-				typeof(ScanContainerCommand), typeof(ExtractContainerCommand))
+				typeof(ScanContainerCommand), typeof(ExtractContainerCommand),
+				typeof(WriteBackRegisterCommand), typeof(WriteBackRecordCommand),
+				typeof(WriteBackPlanCommand), typeof(WriteBackExecuteCommand))
 			.MapResult((BaseCommand bc) => bc.Execute(), errs => 1);
 	}
 }

@@ -1,11 +1,15 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Text;
 using System.Text.Json;
 using FEngLib;
 using FEngLib.Assets;
+using FEngLib.Objects;
 using FEngLib.Packages;
+using FEngLib.Structures;
 
 namespace FEngTestBench;
 
@@ -152,6 +156,9 @@ internal static class ContainerTests
             var safeDirectory = Path.Combine(root, "safe-names");
             var safe = traversal.Extract(traversal.Entries, safeDirectory).Single();
             Check(Path.GetDirectoryName(safe.OutputPath) == safeDirectory, "FNG name escaped output folder.");
+
+            RunWriteBackChecks(root, Save, Check);
+
             Console.WriteLine($"PASS: {checks} container checks. Fixtures: {root}");
             return 0;
         }
@@ -169,6 +176,313 @@ internal static class ContainerTests
         new FrontendChunkWriter(new Package { Name = name, Filename = "fixture" }).Write(writer);
         return Block(FngContainer.FngChunkId, stream.ToArray());
     }
+
+    /// <summary>Fixture with one Group so an equal-length float edit produces exactly four changed bytes.</summary>
+    private static byte[] MakeFngWithObject(string name, float positionX)
+    {
+        var package = new Package { Name = name, Filename = "fixture" };
+        package.Objects.Add(new Group(new ObjectData
+        {
+            Color = new Color4(255, 255, 255, 255),
+            Pivot = new Vector3(1, 2, 3),
+            Position = new Vector3(positionX, 5, 7),
+            Rotation = Quaternion.Identity,
+            Size = new Vector3(10, 20, 30)
+        })
+        {
+            Guid = 0xABCD1234,
+            Name = "probe",
+            NameHash = 0x5678
+        });
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream);
+        new FrontendChunkWriter(package).Write(writer);
+        return Block(FngContainer.FngChunkId, stream.ToArray());
+    }
+
+    /// <summary>Nikki-style padding: marker + flags + 0x20 label + 0x20 watermark, then zeros.</summary>
+    private static byte[] MakeNikkiPadding(int tailBytes)
+    {
+        var payload = new byte[ContainerBlockIndex.NikkiPaddingMetadataLength + tailBytes];
+        BitConverter.GetBytes(ContainerBlockIndex.NikkiPaddingMarker).CopyTo(payload, 0);
+        BitConverter.GetBytes(0).CopyTo(payload, 4);
+        Encoding.ASCII.GetBytes("Padding Block").CopyTo(payload, 8);
+        Encoding.ASCII.GetBytes("FEngLib-TestBench").CopyTo(payload, 40);
+        return Block(0, payload);
+    }
+
+    private static void RunWriteBackChecks(string root, Func<string, byte[], string> save,
+        Action<bool, string> check)
+    {
+        void RejectPlan(ContainerWritePlan plan, string needle, string message)
+        {
+            check(!plan.IsExecutable, message + " (plan unexpectedly executable)");
+            check(plan.Blockers.Concat(plan.Items.SelectMany(i => i.Blockers))
+                    .Any(b => b.Contains(needle, StringComparison.Ordinal)),
+                message + $" (no blocker mentioning '{needle}'): " +
+                string.Join(" | ", plan.Blockers.Concat(plan.Items.SelectMany(i => i.Blockers))));
+        }
+
+        var fngA = MakeFngWithObject("Alpha.fng", 1f);
+        var fngB = MakeFng("Beta.fng");
+        var containerBytes = Block(0x12345678, new byte[37])
+            .Concat(fngA)
+            .Concat(MakeNikkiPadding(4))
+            .Concat(fngB)
+            .Concat(Block(0, new byte[12]))
+            .ToArray();
+        var containerPath = save("writeback.bun", containerBytes);
+        var container = FngContainer.Open(containerPath);
+        check(container.Entries.Count == 2, "Write-back fixture FNG blocks not recognized.");
+
+        var baseline = ContainerBlockIndex.Scan(containerPath);
+        check(baseline.Blocks.Count == 5 && baseline.FngCount == 2, "Full-block index traversal wrong.");
+        check(baseline.Blocks[0].Kind == ContainerBlockKind.Unknown, "Unknown block misclassified.");
+        check(baseline.Blocks[2].Kind == ContainerBlockKind.Padding && baseline.Blocks[2].NikkiPadding &&
+              baseline.Blocks[2].PaddingWatermark == "FEngLib-TestBench", "Nikki padding metadata not parsed.");
+        check(baseline.Blocks[4].Kind == ContainerBlockKind.Padding && !baseline.Blocks[4].NikkiPadding,
+            "Zero padding misclassified as Nikki padding.");
+        check(baseline.Blocks[1].Sha256 != baseline.Blocks[3].Sha256, "Block hashes not distinct.");
+
+        // The edited fixture must survive the real model loader and expose the float edit.
+        var editedBytes = MakeFngWithObject("Alpha.fng", 42f);
+        check(editedBytes.Length == fngA.Length, "Equal-length edit changed total length.");
+        using (var payload = new MemoryStream(editedBytes.Skip(16).ToArray()))
+        using (var reader = new BinaryReader(payload))
+        {
+            var loaded = new FrontendPackageLoader(new HashResolver()).Load(reader);
+            check(loaded.Name == "Alpha.fng" && loaded.Objects.Count == 1 &&
+                  Math.Abs(loaded.Objects[0].Data.Position.X - 42f) < 0.001f,
+                "Edited fixture not loadable with the model loader.");
+        }
+        check(editedBytes.Zip(fngA, (a, b) => a != b).Count(different => different) is > 0 and <= 4,
+            "Float edit should only change position bytes.");
+
+        var extractDir = Path.Combine(root, "wb-extracted");
+        var extracted = container.Extract(container.Entries, extractDir);
+        check(extracted.Count == 2, "Write-back fixture extraction failed.");
+        var alphaPath = extracted.Single(e => e.PackageName == "Alpha.fng").OutputPath;
+        var alphaOffset = extracted.Single(e => e.PackageName == "Alpha.fng").Offset;
+
+        var registration = ContainerSession.Register(containerPath, extractDir);
+        var session = registration.Session;
+        check(session.Bindings.Count == 2, "Bindings were not registered from manifests.");
+        var workPath = Path.Combine(root, "writeback.work.bun");
+        session.CreateWorkingCopy(workPath);
+        check(File.ReadAllBytes(workPath).SequenceEqual(containerBytes), "Working copy differs from original.");
+
+        var idlePlan = ContainerWritePlanner.Build(session);
+        check(!idlePlan.HasPendingChanges && !idlePlan.IsExecutable && idlePlan.Blockers.Count == 0,
+            "No pending changes must be reported as notes, not blockers.");
+
+        var emptyDir = Path.Combine(root, "wb-extracted-empty");
+        Directory.CreateDirectory(emptyDir);
+        File.WriteAllText(Path.Combine(emptyDir, "orphan.source.json"), "{}");
+        var orphanRegistration = ContainerSession.Register(containerPath, emptyDir);
+        check(orphanRegistration.AddedBindings == 0 && orphanRegistration.IgnoredManifests.Count == 1,
+            "Orphan manifest was not ignored at registration.");
+        var noCopyPlan = ContainerWritePlanner.Build(orphanRegistration.Session);
+        check(!noCopyPlan.IsExecutable && noCopyPlan.Blockers.Any(b => b.Contains("工作副本")),
+            "Missing working copy must block planning.");
+
+        // ---- first equal-length write-back ----
+        File.WriteAllBytes(alphaPath, editedBytes);
+        var alphaBinding = session.FindByFile(alphaPath);
+        check(alphaBinding != null, "Saved file did not match any binding.");
+        alphaBinding.RecordSaved(alphaPath, ContainerFileHash.OfFile(alphaPath));
+        check(alphaBinding.HasSavedChange, "Saved change is not pending.");
+
+        var plan1 = ContainerWritePlanner.Build(session);
+        check(plan1.IsExecutable && plan1.Items.Count == 1, "Plan with one equal-length edit must be executable.");
+        check(plan1.Items[0].BlockOffset == alphaOffset && plan1.Items[0].StoredLength == fngA.Length &&
+              plan1.Items[0].ReplacementStoredLength == fngA.Length, "Planned item identity is wrong.");
+        check(!File.Exists(plan1.BackupPath), "Planner must not create the backup file.");
+
+        var report = ContainerWriteBackExecutor.Execute(session, plan1);
+        check(report.Success && report.Items.Count == 1 && report.VerifiedBlockCount == 5,
+            "Write-back report is incomplete.");
+        check(report.Sha256After != report.Sha256Before, "Write-back did not change the copy.");
+
+        var after = ContainerBlockIndex.Scan(workPath);
+        check(after.Blocks.Count == baseline.Blocks.Count &&
+              after.Blocks.Zip(baseline.Blocks).All(p =>
+                  p.First.Offset == p.Second.Offset && p.First.ChunkId == p.Second.ChunkId &&
+                  p.First.PayloadLength == p.Second.PayloadLength),
+            "Block layout changed during equal-length write-back.");
+        check(after.Blocks.Where(b => b.Offset != alphaOffset)
+                .Zip(baseline.Blocks.Where(b => b.Offset != alphaOffset))
+                .All(p => p.First.Sha256 == p.Second.Sha256),
+            "Non-target blocks changed.");
+        check(after.Blocks.Single(b => b.Offset == alphaOffset).Sha256 == report.Items[0].ReplacementSha256,
+            "Target block does not hold the replacement.");
+        check(after.Blocks.Single(b => b.Offset == alphaOffset).PackageName == "Alpha.fng" &&
+              after.Blocks.Single(b => b.Offset == alphaOffset).FngStorage == FngStorageKind.Uncompressed,
+            "Replacement block is not a valid uncompressed FNG.");
+
+        var workContainer = FngContainer.Open(workPath);
+        var reExtracted = workContainer.Extract(new[] { workContainer.Entries[0] },
+            Path.Combine(root, "wb-reextract"));
+        check(File.ReadAllBytes(reExtracted[0].OutputPath).SequenceEqual(File.ReadAllBytes(alphaPath)),
+            "Re-extracted target differs from the replacement file.");
+        check(alphaBinding.LastWriteBackSha256 == report.Items[0].ReplacementSha256 &&
+              !alphaBinding.HasSavedChange, "Ledger did not record the write-back.");
+        check(session.WorkingCopySha256 == report.Sha256After, "Session copy fingerprint not updated.");
+        check(File.Exists(report.BackupPath) && ContainerFileHash.OfFile(report.BackupPath) == report.Sha256Before,
+            "Backup missing or does not hold the pre-write-back content.");
+        check(!Directory.GetFiles(Path.GetDirectoryName(workPath), ".fng-writeback-*").Any(),
+            "Staged candidate left behind.");
+        check(WriteBackJournal.Load(session.SessionDirectory).Single(e => e.Id == report.JournalId).Status
+            == WriteBackJournal.StatusCompleted, "Journal entry not completed.");
+
+        // ---- second consecutive write-back on the already-modified copy ----
+        File.WriteAllBytes(alphaPath, MakeFngWithObject("Alpha.fng", 84f));
+        alphaBinding.RecordSaved(alphaPath, ContainerFileHash.OfFile(alphaPath));
+        var plan2 = ContainerWritePlanner.Build(session);
+        check(plan2.IsExecutable && plan2.Items[0].CurrentBlockSha256 == report.Items[0].ReplacementSha256,
+            "Second plan must verify against the last written content.");
+        var report2 = ContainerWriteBackExecutor.Execute(session, plan2);
+        check(report2.Success && report2.Sha256Before == report.Sha256After,
+            "Second write-back did not chain from the first result.");
+
+        // ---- blocked plans leave everything untouched ----
+        var currentWorkBytes = File.ReadAllBytes(workPath);
+        var currentWorkSha = session.WorkingCopySha256;
+
+        File.WriteAllBytes(alphaPath, MakeFng("Alpha.fng"));
+        alphaBinding.RecordSaved(alphaPath, ContainerFileHash.OfFile(alphaPath));
+        RejectPlan(ContainerWritePlanner.Build(session), "长度不同", "Different length must block.");
+        File.WriteAllBytes(alphaPath, MakeFngWithObject("Alpha.fng", 84f));
+
+        File.WriteAllBytes(alphaPath, MakeFngWithObject("Other.fng", 84f));
+        alphaBinding.RecordSaved(alphaPath, ContainerFileHash.OfFile(alphaPath));
+        RejectPlan(ContainerWritePlanner.Build(session), "包名不一致", "Package name mismatch must block.");
+
+        var corrupted = File.ReadAllBytes(alphaPath);
+        corrupted[16] ^= 0xFF;
+        File.WriteAllBytes(alphaPath, corrupted);
+        alphaBinding.RecordSaved(alphaPath, ContainerFileHash.OfFile(alphaPath));
+        RejectPlan(ContainerWritePlanner.Build(session), "不是未压缩 FNG", "Corrupt replacement must block.");
+
+        var stale = File.ReadAllBytes(alphaPath);
+        alphaBinding.RecordSaved(alphaPath, ContainerFileHash.OfFile(alphaPath));
+        stale[^5] ^= 0x01;
+        File.WriteAllBytes(alphaPath, stale);
+        RejectPlan(ContainerWritePlanner.Build(session), "与保存时记录的摘要不一致", "Post-save modification must block.");
+
+        File.Delete(alphaPath);
+        RejectPlan(ContainerWritePlanner.Build(session), "替换文件不可读", "Missing replacement must block.");
+        File.WriteAllBytes(alphaPath, stale);
+        alphaBinding.RecordSaved(alphaPath, ContainerFileHash.OfFile(alphaPath));
+
+        var betaBinding = session.Bindings.Single(b => b.PackageName == "Beta.fng");
+        betaBinding.CurrentFile = workPath;
+        betaBinding.SavedSha256 = ContainerFileHash.OfFile(workPath);
+        betaBinding.SavedAt = DateTimeOffset.UtcNow;
+        RejectPlan(ContainerWritePlanner.Build(session), "替换文件路径与容器文件相同",
+            "Replacement pointing at the container must block.");
+        betaBinding.CurrentFile = null;
+        betaBinding.SavedSha256 = null;
+        betaBinding.SavedAt = null;
+
+        using (var append = new FileStream(workPath, FileMode.Append, FileAccess.Write, FileShare.None))
+            append.WriteByte(0x00);
+        RejectPlan(ContainerWritePlanner.Build(session), "工作副本",
+            "Externally changed working copy must block.");
+        File.WriteAllBytes(workPath, currentWorkBytes);
+        check(ContainerFileHash.OfFile(workPath) == currentWorkSha, "Restored working copy hash mismatch.");
+
+        var movedContainer = containerPath + ".moved";
+        File.Move(containerPath, movedContainer);
+        RejectPlan(ContainerWritePlanner.Build(session), "原始容器", "Missing original container must block.");
+        File.Move(movedContainer, containerPath);
+
+        // locked working copy fails before anything is written or journaled
+        var journalCountBefore = WriteBackJournal.Load(session.SessionDirectory).Count;
+        using (var locked = new FileStream(workPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var blocked = false;
+            try { ContainerWriteBackExecutor.Execute(session, plan2); }
+            catch (IOException) { blocked = true; }
+            check(blocked, "Locked working copy must fail the transaction.");
+        }
+        check(WriteBackJournal.Load(session.SessionDirectory).Count == journalCountBefore,
+            "A failed transaction must not leave journal entries.");
+        check(File.ReadAllBytes(workPath).SequenceEqual(currentWorkBytes), "Failed transaction changed the copy.");
+
+        // ---- journal recovery ----
+        File.WriteAllBytes(alphaPath, MakeFngWithObject("Alpha.fng", 126f));
+        alphaBinding.RecordSaved(alphaPath, ContainerFileHash.OfFile(alphaPath));
+        var crashBefore = session.WorkingCopySha256;
+        var crashSha = ContainerFileHash.OfFile(alphaPath);
+        WriteBackJournal.Save(session.SessionDirectory, new List<WriteBackJournalEntry>
+        {
+            new()
+            {
+                Id = "crashpre", StartedAt = DateTimeOffset.UtcNow, WorkingCopyPath = workPath,
+                BackupPath = Path.Combine(root, "crash.bak"), WorkingCopySha256Before = crashBefore,
+                Items = { new WriteBackJournalItem { PackageName = "Alpha.fng", BlockOffset = alphaOffset,
+                    ReplacementSha256 = crashSha } },
+                Status = WriteBackJournal.StatusPrepared
+            }
+        });
+        var recoveredPlan = ContainerWritePlanner.Build(session);
+        check(WriteBackJournal.Load(session.SessionDirectory).Single(e => e.Id == "crashpre").Status
+            == WriteBackJournal.StatusFailed, "Interrupted-before-publish entry was not closed.");
+        check(recoveredPlan.IsExecutable, "Recovery did not clear the way for planning.");
+
+        // simulate a crash between publication and ledger update
+        var plan3 = ContainerWritePlanner.Build(session);
+        check(plan3.IsExecutable, "Recovered plan must be executable.");
+        var report3 = ContainerWriteBackExecutor.Execute(session, plan3);
+        check(report3.Success, "Post-recovery write-back failed.");
+        var ledgerBeforeSha = session.WorkingCopySha256;
+        var ledgerBeforeBinding = alphaBinding.LastWriteBackSha256;
+        var historyCount = session.History.Count;
+        alphaBinding.LastWriteBackSha256 = null;
+        session.WorkingCopySha256 = report3.Sha256Before;
+        session.History.RemoveAt(session.History.Count - 1);
+        session.Save();
+        WriteBackJournal.Save(session.SessionDirectory, new List<WriteBackJournalEntry>
+        {
+            new()
+            {
+                Id = "crashpost", StartedAt = DateTimeOffset.UtcNow, WorkingCopyPath = workPath,
+                BackupPath = report3.BackupPath, WorkingCopySha256Before = report3.Sha256Before,
+                WorkingCopySha256Result = report3.Sha256After,
+                Items = { new WriteBackJournalItem { PackageName = "Alpha.fng", BlockOffset = alphaOffset,
+                    ReplacementSha256 = report3.Items[0].ReplacementSha256 } },
+                Status = WriteBackJournal.StatusPublished
+            }
+        });
+        var reconciled = ContainerWritePlanner.Build(session);
+        check(alphaBinding.LastWriteBackSha256 == ledgerBeforeBinding &&
+              session.WorkingCopySha256 == ledgerBeforeSha && session.History.Count == historyCount,
+            "Recovery did not complete the published write-back.");
+        check(WriteBackJournal.Load(session.SessionDirectory).Single(e => e.Id == "crashpost").Status
+            == WriteBackJournal.StatusCompleted, "Recovered journal entry not completed.");
+        check(!reconciled.Blockers.Any(), "Reconciled plan must not carry blockers.");
+
+        // unreconcilable journal state blocks planning until the journal is cleared
+        alphaBinding.RecordSaved(alphaPath, ContainerFileHash.OfFile(alphaPath));
+        WriteBackJournal.Save(session.SessionDirectory, new List<WriteBackJournalEntry>
+        {
+            new()
+            {
+                Id = "bogus", StartedAt = DateTimeOffset.UtcNow, WorkingCopyPath = workPath,
+                BackupPath = Path.Combine(root, "bogus.bak"),
+                WorkingCopySha256Before = "F".PadRight(64, '0'),
+                WorkingCopySha256Result = "A".PadRight(64, '0'),
+                Items = { new WriteBackJournalItem { PackageName = "Alpha.fng", BlockOffset = alphaOffset,
+                    ReplacementSha256 = alphaBinding.SavedSha256 } },
+                Status = WriteBackJournal.StatusPrepared
+            }
+        });
+        RejectPlan(ContainerWritePlanner.Build(session), "需要人工核对", "Unreconcilable journal must block.");
+        File.Delete(WriteBackJournal.JournalFilePath(session.SessionDirectory));
+        var finalPlan = ContainerWritePlanner.Build(session);
+        check(!finalPlan.Blockers.Any(), "Clearing the journal did not unblock planning.");
+    }
+
 
     private static byte[] Block(uint id, byte[] payload)
     {
