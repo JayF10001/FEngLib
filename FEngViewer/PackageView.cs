@@ -451,7 +451,7 @@ public partial class PackageView : Form
 			return;
 		}
 
-		if (_currentRenderTree == null)
+		if (_currentRenderTree == null || !viewOutput.PreviewViewport.Contains(e.Location))
 			return;
 
 		bool WithinBounds(RenderTreeNode node, float x, float y)

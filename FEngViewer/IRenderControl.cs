@@ -15,10 +15,10 @@ public interface IRenderControl
         
     Color4 BackgroundColor { set; }
 
-    /// <summary>Rectangle (control pixels) occupied by the logical 640x480 canvas.</summary>
+    /// <summary>Rectangle (control pixels) occupied by the selected fixed-ratio canvas.</summary>
     Rectangle PreviewViewport { get; }
 
-    PreviewScaleMode PreviewScale { get; set; }
+    PreviewAspectRatio PreviewAspect { get; set; }
 
     event EventHandler PreviewViewportChanged;
 

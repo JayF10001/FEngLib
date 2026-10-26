@@ -85,8 +85,8 @@ public class GLRenderTreeRenderer
             RenderNode(SelectedNode, true);
         }
 
-        _gl.MatrixMode(MatrixMode.Projection);
-        _gl.Ortho(0, 640, 480, 0, -1, 1);
+        // The render control owns the projection and viewport. All geometry above is already
+        // normalized; a pixel-space projection here corrupts subsequent draws in this context.
         _gl.Flush();
         _lastRenderTime = _stopwatch.ElapsedMilliseconds;
     }

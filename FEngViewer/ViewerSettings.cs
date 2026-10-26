@@ -10,7 +10,7 @@ internal sealed class ViewerLayoutState
     public int LeftWidth { get; set; } = ViewerSettings.DefaultLeftWidth;
     public int RightWidth { get; set; } = ViewerSettings.DefaultRightWidth;
     public bool RightCollapsed { get; set; }
-    public string PreviewScale { get; set; } = "fit";
+    public string PreviewAspect { get; set; } = "4:3";
     public string LeftMode { get; set; } = "tree";
 
     public ViewerLayoutState Clone() => new()
@@ -18,7 +18,7 @@ internal sealed class ViewerLayoutState
         LeftWidth = LeftWidth,
         RightWidth = RightWidth,
         RightCollapsed = RightCollapsed,
-        PreviewScale = PreviewScale,
+        PreviewAspect = PreviewAspect,
         LeftMode = LeftMode
     };
 }
@@ -79,7 +79,7 @@ internal static class ViewerSettings
         var result = (state ?? new ViewerLayoutState()).Clone();
         result.LeftWidth = Math.Clamp(result.LeftWidth, MinLeftWidth, clientWidth > 0 ? clientWidth : 4000);
         result.RightWidth = Math.Clamp(result.RightWidth, MinRightWidth, clientWidth > 0 ? clientWidth : 4000);
-        result.PreviewScale = string.Equals(result.PreviewScale, "one", StringComparison.OrdinalIgnoreCase) ? "one" : "fit";
+        result.PreviewAspect = PreviewLayout.ModeName(PreviewLayout.ParseMode(result.PreviewAspect));
         result.LeftMode = string.Equals(result.LeftMode, "files", StringComparison.OrdinalIgnoreCase) ? "files" : "tree";
         if (clientWidth > 0) return Clamp(result, clientWidth);
         return result;

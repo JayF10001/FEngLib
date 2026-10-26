@@ -165,8 +165,8 @@ public partial class PackageView
 
     private void BuildCanvasArea()
     {
-        // The preview fills whatever the centre column has; the 4:3 letterbox is produced by the GL
-        // viewport inside GLRenderControl, never by resizing the control.
+        // The fixed-ratio canvas is centred inside this surface by GLRenderControl; the GL control
+        // itself stays in place when the ratio changes.
         viewOutput.Dock = DockStyle.Fill;
         viewOutput.MinimumSize = Size.Empty;
         viewOutput.MaximumSize = Size.Empty;
@@ -194,9 +194,9 @@ public partial class PackageView
             Margin = new Padding(0),
             Anchor = AnchorStyles.Right
         };
-        _previewScaleCombo.Items.AddRange(new object[] { "适应窗口", "100% 原始比例" });
+        _previewScaleCombo.Items.AddRange(new object[] { "4:3", "16:9", "21:9" });
         _previewScaleCombo.SelectedIndex = 0;
-        _previewScaleCombo.SelectedIndexChanged += (_, _) => ApplyPreviewScale();
+        _previewScaleCombo.SelectedIndexChanged += (_, _) => ApplyPreviewAspect();
 
         _canvasFooter = new TableLayoutPanel
         {
@@ -228,7 +228,7 @@ public partial class PackageView
         _innerSplit.Panel1.Controls.Add(viewOutput);
         _innerSplit.Panel1.Controls.Add(_canvasFooter);
         _innerSplit.Panel1.Controls.Add(_expandRightButton);
-        _layoutToolTip.SetToolTip(_previewScaleCombo, "预览缩放：适应窗口等比填充，或 100% 原始像素");
+        _layoutToolTip.SetToolTip(_previewScaleCombo, "画布比例：保持元素比例，宽屏向左右扩展；画布整体等比缩放并居中显示");
         _layoutToolTip.SetToolTip(_expandRightButton, "展开属性面板");
     }
 
@@ -292,29 +292,32 @@ public partial class PackageView
             _layoutToolTip.SetToolTip(_treeModeButton, "当前文档的对象树");
     }
 
-    #region Preview scale
+    #region Preview aspect ratio
 
-    private void ApplyPreviewScale()
+    private void ApplyPreviewAspect()
     {
         if (_previewScaleCombo == null) return;
-        viewOutput.PreviewScale = _previewScaleCombo.SelectedIndex == 1
-            ? PreviewScaleMode.OneToOne
-            : PreviewScaleMode.Fit;
+        viewOutput.PreviewAspect = _previewScaleCombo.SelectedIndex switch
+        {
+            1 => PreviewAspectRatio.Widescreen16x9,
+            2 => PreviewAspectRatio.Ultrawide21x9,
+            _ => PreviewAspectRatio.Standard4x3
+        };
         UpdatePreviewScaleLabel();
     }
 
     private void UpdatePreviewScaleLabel()
     {
         if (_previewScaleLabel == null) return;
-        _previewScaleLabel.Text = PreviewLayout.Describe(viewOutput.PreviewViewport);
+        _previewScaleLabel.Text = PreviewLayout.Describe(viewOutput.PreviewViewport, viewOutput.PreviewAspect);
     }
 
-    private void ApplyPreviewScaleFromState(string name)
+    private void ApplyPreviewAspectFromState(string name)
     {
         var mode = PreviewLayout.ParseMode(name);
         if (_previewScaleCombo != null)
-            _previewScaleCombo.SelectedIndex = mode == PreviewScaleMode.OneToOne ? 1 : 0;
-        viewOutput.PreviewScale = mode;
+            _previewScaleCombo.SelectedIndex = (int)mode;
+        viewOutput.PreviewAspect = mode;
         UpdatePreviewScaleLabel();
     }
 
@@ -438,7 +441,7 @@ public partial class PackageView
             ClampSplittersToWidth();
             if (state.RightCollapsed) SetRightCollapsed(true, rememberWidth: false);
 
-            ApplyPreviewScaleFromState(state.PreviewScale);
+            ApplyPreviewAspectFromState(state.PreviewAspect);
             SetLeftMode(state.LeftMode == "tree" ? WorkspaceLeftMode.ObjectTree : WorkspaceLeftMode.Files);
         }
         catch (Exception)
@@ -456,7 +459,7 @@ public partial class PackageView
             LeftWidth = _leftWidth,
             RightCollapsed = _rightCollapsed,
             RightWidth = _rightWidth,
-            PreviewScale = PreviewLayout.ModeName(viewOutput.PreviewScale),
+            PreviewAspect = PreviewLayout.ModeName(viewOutput.PreviewAspect),
             LeftMode = _leftMode == WorkspaceLeftMode.Files ? "files" : "tree"
         };
         // Save the preferred widths, not the ones clamped by the current (possibly small) window; the

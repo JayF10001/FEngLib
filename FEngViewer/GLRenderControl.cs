@@ -14,7 +14,7 @@ public partial class GLRenderControl : UserControl, IRenderControl
     private GLRenderTreeRenderer _renderer;
 
     [CanBeNull] private RenderTree _renderTree;
-    private PreviewScaleMode _previewScale = PreviewScaleMode.Fit;
+    private PreviewAspectRatio _previewAspect = PreviewAspectRatio.Standard4x3;
     private Rectangle _previewViewport = new(0, 0, PreviewLayout.LogicalWidth, PreviewLayout.LogicalHeight);
 
     public GLRenderControl()
@@ -30,23 +30,24 @@ public partial class GLRenderControl : UserControl, IRenderControl
     /// <summary>Raised when the letterbox rectangle changes, so the status strip can show the scale.</summary>
     public event EventHandler PreviewViewportChanged;
 
-    /// <summary>Rectangle (control pixels) occupied by the logical 640x480 canvas.</summary>
+    /// <summary>Rectangle (control pixels) occupied by the selected fixed-ratio canvas.</summary>
     public Rectangle PreviewViewport => _previewViewport;
 
-    public PreviewScaleMode PreviewScale
+    public PreviewAspectRatio PreviewAspect
     {
-        get => _previewScale;
+        get => _previewAspect;
         set
         {
-            if (_previewScale == value) return;
-            _previewScale = value;
+            if (!Enum.IsDefined(typeof(PreviewAspectRatio), value)) value = PreviewAspectRatio.Standard4x3;
+            if (_previewAspect == value) return;
+            _previewAspect = value;
             UpdatePreviewViewport();
             Invalidate();
         }
     }
 
     /// <summary>Maps a control-space point into the logical 640x480 HUD space.</summary>
-    public PointF ScreenToLogical(Point point) => PreviewLayout.ScreenToLogical(point, _previewViewport);
+    public PointF ScreenToLogical(Point point) => PreviewLayout.ScreenToLogical(point, _previewViewport, _previewAspect);
 
     public Color4 BackgroundColor
     {
@@ -72,7 +73,7 @@ public partial class GLRenderControl : UserControl, IRenderControl
     private void UpdatePreviewViewport()
     {
         var viewport = PreviewLayout.ComputeViewport(
-            new Size(Math.Max(1, ClientSize.Width), Math.Max(1, ClientSize.Height)), _previewScale);
+            new Size(Math.Max(1, ClientSize.Width), Math.Max(1, ClientSize.Height)), _previewAspect);
         if (viewport == _previewViewport) return;
         _previewViewport = viewport;
         PreviewViewportChanged?.Invoke(this, EventArgs.Empty);
@@ -102,20 +103,21 @@ public partial class GLRenderControl : UserControl, IRenderControl
     }
 
     /// <summary>
-    /// The renderer always draws in the fixed 640x480 logical space. The viewport decides where and
-    /// how large that space appears, which keeps the 4:3 aspect without touching FNG coordinates.
+    /// Quad and GLGlyphRenderer already convert the 640x480 logical canvas to normalized -1..1
+    /// vertices. Wider ratios compress only normalized X, expanding the visible logical width
+    /// without stretching elements; the viewport then scales both pixel axes uniformly.
     /// </summary>
     private void ApplyViewport(SharpGL.OpenGL gl)
     {
         var client = openglControl1.ClientSize;
         var width = Math.Max(1, client.Width);
         var height = Math.Max(1, client.Height);
-        var viewport = PreviewLayout.ComputeViewport(new Size(width, height), _previewScale);
+        var viewport = PreviewLayout.ComputeViewport(new Size(width, height), _previewAspect);
         _previewViewport = viewport;
 
         gl.MatrixMode(MatrixMode.Projection);
         gl.LoadIdentity();
-        gl.Ortho(0, PreviewLayout.LogicalWidth, PreviewLayout.LogicalHeight, 0, -1, 1);
+        gl.Scale(PreviewLayout.LogicalWidth / PreviewLayout.CanvasSize(_previewAspect).Width, 1f, 1f);
         gl.Viewport(viewport.X, height - (viewport.Y + viewport.Height),
             Math.Max(1, viewport.Width), Math.Max(1, viewport.Height));
         gl.MatrixMode(MatrixMode.Modelview);
