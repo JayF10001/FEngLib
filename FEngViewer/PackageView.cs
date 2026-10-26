@@ -166,6 +166,7 @@ public partial class PackageView : Form
 		// treeView1.ExpandAll();
 		treeView1.EndUpdate();
 
+		if (_expandTreeButton != null) _expandTreeButton.Text = "⊟";
 		treeView1.SelectedNode = _rootNode;
 	}
 
@@ -386,6 +387,8 @@ public partial class PackageView : Form
 		if (e.Node == _rootNode && _rootNode != null)
 		{
 			LblChildsCount.Text = "Children: " + _currentPackage.Objects.Where(x => x.Parent == null).Count().ToString("D5") + " | Total: " + CountChildren(null);
+			// The package root has no editable object, so show the panel's empty state.
+			SetPropertyTarget(null);
 		}
 		else if (e.Node?.Tag is RenderTreeNode viewNode)
 		{
@@ -395,27 +398,27 @@ public partial class PackageView : Form
 			if (wrappedObject is Group)
 				LblChildsCount.Text = "Children: " + _currentPackage.Objects.Where(x => wrappedObject.NameHash == x.Parent?.NameHash && wrappedObject.Guid == x.Parent?.Guid).Count().ToString("D5")
 					 + " | Total: " + CountChildren(wrappedObject);
-			objectPropertyGrid.SelectedObject = wrappedObject switch
+			SetPropertyTarget(wrappedObject switch
 			{
 				Text t => new TextObjectViewWrapper(t, AppService.Instance.HashResolver),
 				Image i => new ImageObjectViewWrapper(i, AppService.Instance.HashResolver),
 				ColoredImage ci => new ColoredImageObjectViewWrapper(ci, AppService.Instance.HashResolver),
 				_ => new DefaultObjectViewWrapper(wrappedObject, AppService.Instance.HashResolver)
-			};
+			});
 		}
 #if DEBUG
 		else if (e.Node?.Tag is Script script)
 		{
-			objectPropertyGrid.SelectedObject = new DefaultScriptViewWrapper(script, AppService.Instance.HashResolver);
+			SetPropertyTarget(new DefaultScriptViewWrapper(script, AppService.Instance.HashResolver));
 		}
 #endif
 		else
 		{
 
 #if DEBUG
-			objectPropertyGrid.SelectedObject = e.Node?.Tag;
+			SetPropertyTarget(e.Node?.Tag);
 #else
-			objectPropertyGrid.SelectedObject = null;
+			SetPropertyTarget(null);
 #endif
 			LblItemIndex.Text = null;
 			LblChildsCount.Text = null;
@@ -423,9 +426,20 @@ public partial class PackageView : Form
 		Render();
 	}
 
+	/// <summary>
+	/// Screen point -> FE point. The preview rectangle can be scaled and centred, so this conversion
+	/// must go through the render control instead of assuming a 1:1 640x480 surface.
+	/// </summary>
+	private PointF ToFePoint(Point screenPoint)
+	{
+		var logical = viewOutput.ScreenToLogical(screenPoint);
+		return new PointF(logical.X - PreviewLayout.LogicalWidth / 2f, logical.Y - PreviewLayout.LogicalHeight / 2f);
+	}
+
 	private void viewOutput_MouseMove(object sender, MouseEventArgs e)
 	{
-		labelCoordDisplay.Text = $"FE: ({e.X - 320,4:D}, {e.Y - 240,4:D}) | Real: ({e.X,4:D}, {e.Y,4:D})";
+		var fe = ToFePoint(e.Location);
+		labelCoordDisplay.Text = $"FE: ({fe.X,4:0}, {fe.Y,4:0}) | Real: ({e.X,4:D}, {e.Y,4:D})";
 	}
 
 	private void viewOutput_MouseClick(object sender, MouseEventArgs e)
@@ -447,8 +461,9 @@ public partial class PackageView : Form
 			return extents.HasValue && extents.Value.Contains((int)x, (int)y);
 		}
 
-		var feX = e.X - 320;
-		var feY = e.Y - 240;
+		var fe = ToFePoint(e.Location);
+		var feX = fe.X;
+		var feY = fe.Y;
 
 		// get highest Z rendertreenode with the click location in bounds
 		var renderTree = RenderTree.GetAllTreeNodesForRendering(_currentRenderTree);
@@ -826,7 +841,7 @@ public partial class PackageView : Form
 			_packageViewExtensions.SearchIndex = -1;
 		}
 
-		if (_workspace?.Active != null)
+		if (_workspace?.Active != null && _leftMode == WorkspaceLeftMode.ObjectTree)
 		{
 			_workspace.Active.SearchText = TxtSearch.Text;
 			_workspace.Active.SearchIndex = _packageViewExtensions.SearchIndex;

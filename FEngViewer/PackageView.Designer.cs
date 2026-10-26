@@ -54,8 +54,6 @@ namespace FEngViewer
 			this.renameScriptMenuItem = new ToolStripMenuItem();
 			this.moveUpScriptMenuItem = new ToolStripMenuItem();
 			this.moveDownScriptMenuItem = new ToolStripMenuItem();
-			this.tableLayoutPanel1 = new TableLayoutPanel();
-			this.tableLayoutPanel2 = new TableLayoutPanel();
 			this.BtnNext = new Button();
 			this.BtnPrevious = new Button();
 			this.TxtSearch = new TextBox();
@@ -69,24 +67,14 @@ namespace FEngViewer
 			this.menuStrip1.SuspendLayout();
 			this.objectContextMenu.SuspendLayout();
 			this.scriptContextMenu.SuspendLayout();
-			this.tableLayoutPanel1.SuspendLayout();
-			this.tableLayoutPanel2.SuspendLayout();
 			this.groupBox1.SuspendLayout();
 			this.viewerContextMenu.SuspendLayout();
 			this.SuspendLayout();
 			// 
 			// viewOutput
 			// 
-			this.viewOutput.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-			this.viewOutput.AutoSizeMode = AutoSizeMode.GrowAndShrink;
 			this.viewOutput.BackColor = System.Drawing.Color.Black;
-			this.tableLayoutPanel1.SetColumnSpan(this.viewOutput, 2);
-			this.viewOutput.Location = new System.Drawing.Point(410, 2);
-			this.viewOutput.Margin = new Padding(3, 2, 3, 2);
-			this.viewOutput.MaximumSize = new System.Drawing.Size(640, 480);
-			this.viewOutput.MinimumSize = new System.Drawing.Size(640, 480);
 			this.viewOutput.Name = "viewOutput";
-			this.tableLayoutPanel1.SetRowSpan(this.viewOutput, 2);
 			this.viewOutput.SelectedNode = null;
 			this.viewOutput.Size = new System.Drawing.Size(640, 480);
 			this.viewOutput.TabIndex = 0;
@@ -97,7 +85,6 @@ namespace FEngViewer
 			// labelCoordDisplay
 			// 
 			this.labelCoordDisplay.AutoSize = true;
-			this.labelCoordDisplay.Location = new System.Drawing.Point(410, 484);
 			this.labelCoordDisplay.Name = "labelCoordDisplay";
 			this.labelCoordDisplay.Size = new System.Drawing.Size(72, 15);
 			this.labelCoordDisplay.TabIndex = 2;
@@ -245,53 +232,8 @@ namespace FEngViewer
 			this.moveDownScriptMenuItem.Text = "Move down";
 			this.moveDownScriptMenuItem.Click += this.moveDownScriptMenuItem_Click;
 			// 
-			// tableLayoutPanel1
-			// 
-			this.tableLayoutPanel1.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-			this.tableLayoutPanel1.AutoSize = true;
-			this.tableLayoutPanel1.ColumnCount = 4;
-			this.tableLayoutPanel1.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-			this.tableLayoutPanel1.ColumnStyles.Add(new ColumnStyle());
-			this.tableLayoutPanel1.ColumnStyles.Add(new ColumnStyle());
-			this.tableLayoutPanel1.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-			this.tableLayoutPanel1.Controls.Add(this.tableLayoutPanel2, 0, 0);
-			this.tableLayoutPanel1.Controls.Add(this.viewOutput, 1, 0);
-			this.tableLayoutPanel1.Controls.Add(this.labelCoordDisplay, 1, 2);
-			this.tableLayoutPanel1.Controls.Add(this.objectPropertyGrid, 3, 0);
-			this.tableLayoutPanel1.Controls.Add(this.treeView1, 0, 1);
-			this.tableLayoutPanel1.Controls.Add(this.groupBox1, 3, 3);
-			this.tableLayoutPanel1.Location = new System.Drawing.Point(12, 27);
-			this.tableLayoutPanel1.Name = "tableLayoutPanel1";
-			this.tableLayoutPanel1.RowCount = 4;
-			this.tableLayoutPanel1.RowStyles.Add(new RowStyle());
-			this.tableLayoutPanel1.RowStyles.Add(new RowStyle());
-			this.tableLayoutPanel1.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-			this.tableLayoutPanel1.RowStyles.Add(new RowStyle());
-			this.tableLayoutPanel1.Size = new System.Drawing.Size(1460, 820);
-			this.tableLayoutPanel1.TabIndex = 6;
-			// 
-			// tableLayoutPanel2
-			// 
-			this.tableLayoutPanel2.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-			this.tableLayoutPanel2.AutoSize = true;
-			this.tableLayoutPanel2.ColumnCount = 2;
-			this.tableLayoutPanel2.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-			this.tableLayoutPanel2.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-			this.tableLayoutPanel2.Controls.Add(this.BtnNext, 1, 1);
-			this.tableLayoutPanel2.Controls.Add(this.BtnPrevious, 0, 1);
-			this.tableLayoutPanel2.Controls.Add(this.TxtSearch, 0, 0);
-			this.tableLayoutPanel2.Location = new System.Drawing.Point(3, 3);
-			this.tableLayoutPanel2.Name = "tableLayoutPanel2";
-			this.tableLayoutPanel2.RowCount = 2;
-			this.tableLayoutPanel2.RowStyles.Add(new RowStyle());
-			this.tableLayoutPanel2.RowStyles.Add(new RowStyle());
-			this.tableLayoutPanel2.Size = new System.Drawing.Size(401, 58);
-			this.tableLayoutPanel2.TabIndex = 8;
-			// 
 			// BtnNext
 			// 
-			this.BtnNext.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-			this.BtnNext.Location = new System.Drawing.Point(203, 32);
 			this.BtnNext.Name = "BtnNext";
 			this.BtnNext.Size = new System.Drawing.Size(195, 23);
 			this.BtnNext.TabIndex = 7;
@@ -301,8 +243,6 @@ namespace FEngViewer
 			// 
 			// BtnPrevious
 			// 
-			this.BtnPrevious.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-			this.BtnPrevious.Location = new System.Drawing.Point(3, 32);
 			this.BtnPrevious.Name = "BtnPrevious";
 			this.BtnPrevious.Size = new System.Drawing.Size(194, 23);
 			this.BtnPrevious.TabIndex = 7;
@@ -312,9 +252,6 @@ namespace FEngViewer
 			// 
 			// TxtSearch
 			// 
-			this.TxtSearch.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-			this.tableLayoutPanel2.SetColumnSpan(this.TxtSearch, 2);
-			this.TxtSearch.Location = new System.Drawing.Point(3, 3);
 			this.TxtSearch.Name = "TxtSearch";
 			this.TxtSearch.PlaceholderText = "Search";
 			this.TxtSearch.Size = new System.Drawing.Size(395, 23);
@@ -323,19 +260,14 @@ namespace FEngViewer
 			// 
 			// objectPropertyGrid
 			// 
-			this.objectPropertyGrid.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-			this.objectPropertyGrid.Location = new System.Drawing.Point(1056, 3);
 			this.objectPropertyGrid.Name = "objectPropertyGrid";
-			this.tableLayoutPanel1.SetRowSpan(this.objectPropertyGrid, 3);
 			this.objectPropertyGrid.Size = new System.Drawing.Size(401, 755);
 			this.objectPropertyGrid.TabIndex = 5;
 			// 
 			// treeView1
 			// 
 			this.treeView1.Dock = DockStyle.Fill;
-			this.treeView1.Location = new System.Drawing.Point(3, 67);
 			this.treeView1.Name = "treeView1";
-			this.tableLayoutPanel1.SetRowSpan(this.treeView1, 2);
 			this.treeView1.Size = new System.Drawing.Size(401, 691);
 			this.treeView1.TabIndex = 2;
 			this.treeView1.AfterSelect += this.treeView1_AfterSelect;
@@ -343,11 +275,9 @@ namespace FEngViewer
 			// 
 			// groupBox1
 			// 
-			this.groupBox1.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
 			this.groupBox1.AutoSize = true;
 			this.groupBox1.Controls.Add(this.LblChildsCount);
 			this.groupBox1.Controls.Add(this.LblItemIndex);
-			this.groupBox1.Location = new System.Drawing.Point(1056, 764);
 			this.groupBox1.Name = "groupBox1";
 			this.groupBox1.Size = new System.Drawing.Size(401, 53);
 			this.groupBox1.TabIndex = 9;
@@ -389,11 +319,9 @@ namespace FEngViewer
 			// PackageView
 			// 
 			this.AutoScaleMode = AutoScaleMode.Inherit;
-			this.AutoScroll = true;
-			this.AutoScrollMinSize = new System.Drawing.Size(1000, 600);
 			this.ClientSize = new System.Drawing.Size(1484, 861);
-			this.Controls.Add(this.tableLayoutPanel1);
 			this.Controls.Add(this.menuStrip1);
+			this.MinimumSize = new System.Drawing.Size(820, 560);
 			this.Name = "PackageView";
 			this.Text = "FEngViewer";
 			this.Load += this.PackageView_Load;
@@ -401,10 +329,6 @@ namespace FEngViewer
 			this.menuStrip1.PerformLayout();
 			this.objectContextMenu.ResumeLayout(false);
 			this.scriptContextMenu.ResumeLayout(false);
-			this.tableLayoutPanel1.ResumeLayout(false);
-			this.tableLayoutPanel1.PerformLayout();
-			this.tableLayoutPanel2.ResumeLayout(false);
-			this.tableLayoutPanel2.PerformLayout();
 			this.groupBox1.ResumeLayout(false);
 			this.groupBox1.PerformLayout();
 			this.viewerContextMenu.ResumeLayout(false);
@@ -427,11 +351,9 @@ namespace FEngViewer
 		private ToolStripMenuItem pasteToolStripMenuItem;
 		private ToolStripMenuItem cutToolStripMenuItem;
 		private ToolStripMenuItem renameToolStripMenuItem;
-		private TableLayoutPanel tableLayoutPanel1;
 		internal TreeView treeView1;
 		private PropertyGrid objectPropertyGrid;
 		private TextBox TxtSearch;
-		private TableLayoutPanel tableLayoutPanel2;
 		private Button BtnNext;
 		private Button BtnPrevious;
 		private ToolStripMenuItem moveUpToolStripMenuItem;

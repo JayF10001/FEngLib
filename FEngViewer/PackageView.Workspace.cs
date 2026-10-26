@@ -74,9 +74,13 @@ public partial class PackageView
 
     private readonly Dictionary<WorkspaceDocument, RenderCache> _documentTrees = new();
     private readonly Dictionary<string, TreeNode> _workspaceNodes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<TreeNode, string> _workspaceNodeCaptions = new();
+    private readonly Dictionary<TreeNode, int> _workspaceNodeWidths = new();
     private readonly List<string> _recentDocuments = new();
     private WorkspaceDocument _boundDocument;
     private WorkspaceLeftMode _leftMode = WorkspaceLeftMode.ObjectTree;
+    private string _fileFilterText = "";
+    private bool _syncingSearch;
 
     private WorkspaceDocument ActiveDocument => _workspace?.Active;
 
@@ -85,10 +89,11 @@ public partial class PackageView
         _workspace = new DocumentWorkspace(new WorkspacePrompts(this));
         _boldNodeFont = new Font(treeView1.Font, FontStyle.Bold);
 
+        BuildShell();
         BuildTabBar();
         BuildLeftPanel();
-        BuildMenus();
         BuildStatusBar();
+        BuildMenus();
 
         _workspace.Changed += (_, _) => RefreshWorkspaceStructure();
         _workspace.StateChanged += (_, _) => RefreshWorkspaceState();
@@ -101,38 +106,18 @@ public partial class PackageView
 
         TxtSearch.TextChanged += TxtSearch_TextChanged;
         FormClosing += PackageView_FormClosing;
+        ApplyMetricHeights();
         SetLeftMode(WorkspaceLeftMode.ObjectTree);
+        FinishLayoutToolTips();
         SetFormDetails();
-        FitWindowToLayout();
-    }
-
-    /// <summary>
-    /// The added tab strip, mode switch and status bar make the anchored table taller; grow the
-    /// window so the status bar is not hidden behind the form's auto-scroll area.
-    /// </summary>
-    private void FitWindowToLayout()
-    {
-        tableLayoutPanel1.PerformLayout();
-        var tableHeight = tableLayoutPanel1.PreferredSize.Height;
-        if (tableHeight <= 0) return;
-        var needed = tableLayoutPanel1.Top + tableHeight + 8;
-        if (needed <= ClientSize.Height) return;
-        var limit = Screen.FromControl(this).WorkingArea.Height - 40;
-        needed = Math.Min(needed, limit);
-        if (needed > ClientSize.Height) ClientSize = new Size(ClientSize.Width, needed);
     }
 
     #region UI construction
 
     private void BuildTabBar()
     {
-        _tabBar = new DocumentTabBar { Dock = DockStyle.Fill, Margin = new Padding(3, 0, 3, 2) };
-        tableLayoutPanel1.RowCount++;
-        tableLayoutPanel1.RowStyles.Insert(0, new RowStyle(SizeType.Absolute, 32));
-        foreach (Control control in tableLayoutPanel1.Controls)
-            tableLayoutPanel1.SetRow(control, tableLayoutPanel1.GetRow(control) + 1);
-        tableLayoutPanel1.Controls.Add(_tabBar, 0, 0);
-        tableLayoutPanel1.SetColumnSpan(_tabBar, 4);
+        _tabBar = new DocumentTabBar { Dock = DockStyle.Top, Height = 32, Margin = Padding.Empty };
+        _host.Controls.Add(_tabBar);
 
         _tabBar.SelectionRequested += index =>
         {
@@ -157,6 +142,7 @@ public partial class PackageView
         // The mode switch reuses the existing object tree control next to the workspace file list.
         _filesModeButton = CreateModeButton("FNG 文件", (_, _) => SetLeftMode(WorkspaceLeftMode.Files));
         _treeModeButton = CreateModeButton("当前对象树", (_, _) => SetLeftMode(WorkspaceLeftMode.ObjectTree));
+
         var modeLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -164,7 +150,7 @@ public partial class PackageView
             RowCount = 1,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Margin = new Padding(0, 0, 0, 4)
+            Margin = new Padding(0, 0, 0, 2)
         };
         modeLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         modeLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -173,16 +159,81 @@ public partial class PackageView
         modeLayout.Controls.Add(_filesModeButton, 0, 0);
         modeLayout.Controls.Add(_treeModeButton, 1, 0);
 
-        tableLayoutPanel2.RowCount++;
-        tableLayoutPanel2.RowStyles.Insert(0, new RowStyle(SizeType.AutoSize));
-        foreach (Control control in tableLayoutPanel2.Controls)
-            tableLayoutPanel2.SetRow(control, tableLayoutPanel2.GetRow(control) + 1);
-        tableLayoutPanel2.Controls.Add(modeLayout, 0, 0);
-        tableLayoutPanel2.SetColumnSpan(modeLayout, 2);
+        // FNG mode: filter + sort. Object tree mode: previous/next + expand toggle. Only one set is
+        // visible at a time, so no dead buttons take up toolbar height.
+        _fileSortCombo = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Margin = new Padding(2, 0, 0, 0)
+        };
+        _fileSortCombo.Items.AddRange(new object[] { "导入顺序", "按名称" });
+        _fileSortCombo.SelectedIndex = 0;
+        _fileSortCombo.SelectedIndexChanged += (_, _) =>
+        {
+            if (_leftMode == WorkspaceLeftMode.Files) RebuildWorkspaceTree();
+        };
+        _fileExtras = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = false,
+            FlowDirection = FlowDirection.LeftToRight,
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty
+        };
+        _fileExtras.Controls.Add(_fileSortCombo);
 
-        var treeRow = tableLayoutPanel1.GetRow(treeView1);
-        var treeSpan = tableLayoutPanel1.GetRowSpan(treeView1);
-        tableLayoutPanel1.Controls.Remove(treeView1);
+        ConfigureToolButton(BtnPrevious, "◀");
+        ConfigureToolButton(BtnNext, "▶");
+        _expandTreeButton = new Button();
+        ConfigureToolButton(_expandTreeButton, "⊞");
+        _expandTreeButton.Click += (_, _) => ToggleTreeExpansion();
+        _treeExtras = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = false,
+            FlowDirection = FlowDirection.LeftToRight,
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty
+        };
+        _treeExtras.Controls.Add(BtnPrevious);
+        _treeExtras.Controls.Add(BtnNext);
+        _treeExtras.Controls.Add(_expandTreeButton);
+
+        TxtSearch.Dock = DockStyle.Fill;
+        TxtSearch.Margin = Padding.Empty;
+
+        _searchRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = Padding.Empty
+        };
+        _searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _searchRow.Controls.Add(TxtSearch, 0, 0);
+        _searchRow.Controls.Add(_fileExtras, 1, 0);
+        _searchRow.Controls.Add(_treeExtras, 1, 0);
+
+        _leftToolbar = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            ColumnCount = 1,
+            RowCount = 2,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(0, 0, 0, 2),
+            Margin = Padding.Empty
+        };
+        _leftToolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _leftToolbar.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        _leftToolbar.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        _leftToolbar.Controls.Add(modeLayout, 0, 0);
+        _leftToolbar.Controls.Add(_searchRow, 0, 1);
 
         _workspaceTree = new TreeView
         {
@@ -194,18 +245,21 @@ public partial class PackageView
             ShowLines = false,
             ShowRootLines = true,
             ShowNodeToolTips = true,
+            // Long names are truncated with an ellipsis instead of producing a scrollbar.
+            Scrollable = false,
             BorderStyle = BorderStyle.FixedSingle
         };
         BuildWorkspaceIcons();
         _workspaceTree.ImageList = _workspaceIcons;
+        _workspaceTree.ClientSizeChanged += (_, _) => ApplyWorkspaceNodeTextWidths();
         treeView1.Dock = DockStyle.Fill;
         treeView1.Margin = new Padding(0);
 
         _leftStack = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
         _leftStack.Controls.Add(_workspaceTree);
         _leftStack.Controls.Add(treeView1);
-        tableLayoutPanel1.Controls.Add(_leftStack, 0, treeRow);
-        tableLayoutPanel1.SetRowSpan(_leftStack, treeSpan);
+        _splitOuter.Panel1.Controls.Add(_leftStack);
+        _splitOuter.Panel1.Controls.Add(_leftToolbar);
 
         _workspaceTree.NodeMouseDoubleClick += (_, e) =>
         {
@@ -218,13 +272,25 @@ public partial class PackageView
         BuildWorkspaceMenu();
     }
 
-    private static Button CreateModeButton(string text, EventHandler onClick)
+    private void ToggleTreeExpansion()
+    {
+        if (treeView1.Nodes.Count == 0) return;
+        var expand = !treeView1.Nodes[0].IsExpanded;
+        if (expand) treeView1.ExpandAll();
+        else treeView1.CollapseAll();
+        _expandTreeButton.Text = expand ? "⊟" : "⊞";
+    }
+
+    /// <summary>Mode buttons size themselves from the font so a scaled UI never clips the label.</summary>
+    private Button CreateModeButton(string text, EventHandler onClick)
     {
         var button = new Button
         {
             Text = text,
             FlatStyle = FlatStyle.Flat,
-            Height = 26,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(0, LineHeight + 10),
             Margin = new Padding(0, 0, 2, 0),
             UseVisualStyleBackColor = false
         };
@@ -232,6 +298,16 @@ public partial class PackageView
         button.FlatAppearance.BorderSize = 1;
         button.Click += onClick;
         return button;
+    }
+
+    private void ConfigureToolButton(Button button, string text)
+    {
+        button.Text = text;
+        button.AutoSize = true;
+        button.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        button.MinimumSize = new Size(LineHeight + 12, LineHeight + 8);
+        button.Margin = new Padding(0, 0, 2, 0);
+        button.TabStop = false;
     }
 
     private void BuildWorkspaceIcons()
@@ -287,14 +363,10 @@ public partial class PackageView
         layout.Controls.Add(_statusLeft, 0, 0);
         layout.Controls.Add(_statusRight, 1, 0);
 
-        _statusBar = new Panel { Dock = DockStyle.Fill, Margin = new Padding(3, 0, 3, 0) };
+        _statusBar = new Panel { Dock = DockStyle.Bottom, Height = 24, Margin = Padding.Empty };
         _statusBar.Controls.Add(layout);
         _statusBar.Paint += (_, e) => e.Graphics.DrawLine(SystemPens.ControlDark, 0, 0, _statusBar.Width, 0);
-
-        tableLayoutPanel1.RowCount++;
-        tableLayoutPanel1.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-        tableLayoutPanel1.Controls.Add(_statusBar, 0, tableLayoutPanel1.RowCount - 1);
-        tableLayoutPanel1.SetColumnSpan(_statusBar, 4);
+        _host.Controls.Add(_statusBar);
     }
 
     private void BuildMenus()
@@ -382,6 +454,7 @@ public partial class PackageView
     {
         UpdateTabBar();
         RebuildWorkspaceTree();
+        UpdateFileCountHint();
         SetFormDetails();
     }
 
@@ -390,6 +463,7 @@ public partial class PackageView
         UpdateTabBar();
         UpdateWorkspaceNodeStates();
         UpdateWorkspaceMenuState();
+        UpdateFileCountHint();
         SetFormDetails();
     }
 
@@ -408,7 +482,13 @@ public partial class PackageView
     private void PackageView_FormClosing(object sender, FormClosingEventArgs e)
     {
         if (_workspace == null) return;
-        if (!_workspace.CloseAll()) e.Cancel = true;
+        if (!_workspace.CloseAll())
+        {
+            e.Cancel = true;
+            return;
+        }
+
+        SaveLayoutState();
     }
 
     private void BindDocument(WorkspaceDocument document)
@@ -432,8 +512,13 @@ public partial class PackageView
             _packageViewExtensions.ShouldCopyObject = false;
             _packageViewExtensions.SearchText = document.SearchText;
             _packageViewExtensions.SearchIndex = document.SearchIndex;
-            TxtSearch.Text = document.SearchText;
-            objectPropertyGrid.SelectedObject = null;
+            if (_leftMode == WorkspaceLeftMode.ObjectTree)
+            {
+                _syncingSearch = true;
+                try { TxtSearch.Text = document.SearchText; }
+                finally { _syncingSearch = false; }
+            }
+            SetPropertyTarget(null);
             viewOutput.SelectedNode = null;
             PopulateTreeView(document.Package, _currentRenderTree);
             RestoreTreeSelection(document.SelectedTreeKey);
@@ -476,7 +561,7 @@ public partial class PackageView
         var document = _boundDocument;
         if (document == null) return;
         document.SelectedTreeKey = treeView1.SelectedNode?.Name;
-        document.SearchText = TxtSearch.Text;
+        if (_leftMode == WorkspaceLeftMode.ObjectTree) document.SearchText = TxtSearch.Text;
         document.SearchIndex = _packageViewExtensions.SearchIndex;
     }
 
@@ -491,11 +576,13 @@ public partial class PackageView
         _packageViewExtensions.SearchText = null;
         _packageViewExtensions.SearchIndex = -1;
         _rootNode = null;
-        TxtSearch.Text = "";
+        _syncingSearch = true;
+        try { TxtSearch.Text = ""; }
+        finally { _syncingSearch = false; }
         treeView1.BeginUpdate();
         treeView1.Nodes.Clear();
         treeView1.EndUpdate();
-        objectPropertyGrid.SelectedObject = null;
+        SetPropertyTarget(null);
         viewOutput.SelectedNode = null;
         viewOutput.Render(null);
         LblItemIndex.Text = "Index: 00000";
@@ -516,25 +603,72 @@ public partial class PackageView
 
     private void SetLeftMode(WorkspaceLeftMode mode)
     {
+        var previous = _leftMode;
+        if (_leftToolbar != null && !_syncingSearch && previous != mode)
+        {
+            if (previous == WorkspaceLeftMode.Files) _fileFilterText = TxtSearch.Text;
+            else PersistNodeSearchText();
+        }
+
         _leftMode = mode;
         if (_workspaceTree == null || treeView1 == null) return;
+
         _workspaceTree.Visible = mode == WorkspaceLeftMode.Files;
         treeView1.Visible = mode == WorkspaceLeftMode.ObjectTree;
-        var active = mode == WorkspaceLeftMode.Files;
-        _filesModeButton.BackColor = active ? SystemColors.Highlight : SystemColors.Control;
-        _filesModeButton.ForeColor = active ? SystemColors.HighlightText : SystemColors.ControlText;
-        _treeModeButton.BackColor = active ? SystemColors.Control : SystemColors.Highlight;
-        _treeModeButton.ForeColor = active ? SystemColors.ControlText : SystemColors.HighlightText;
-        TxtSearch.PlaceholderText = active ? "搜索 FNG 文件..." : "搜索节点...";
-        BtnPrevious.Enabled = !active;
-        BtnNext.Enabled = !active;
-        if (active) RebuildWorkspaceTree();
+        var files = mode == WorkspaceLeftMode.Files;
+        _filesModeButton.BackColor = files ? SystemColors.Highlight : SystemColors.Control;
+        _filesModeButton.ForeColor = files ? SystemColors.HighlightText : SystemColors.ControlText;
+        _treeModeButton.BackColor = files ? SystemColors.Control : SystemColors.Highlight;
+        _treeModeButton.ForeColor = files ? SystemColors.ControlText : SystemColors.HighlightText;
+        _fileExtras.Visible = files;
+        _treeExtras.Visible = !files;
+        UpdateFileCountHint();
+
+        _syncingSearch = true;
+        try { TxtSearch.Text = files ? _fileFilterText : (NodeSearchText() ?? ""); }
+        finally { _syncingSearch = false; }
+
+        if (files)
+        {
+            RebuildWorkspaceTree();
+        }
+        else
+        {
+            _packageViewExtensions.SearchText = TxtSearch.Text;
+            _packageViewExtensions.SearchIndex = _workspace.Active?.SearchIndex ?? -1;
+        }
+    }
+
+    private string NodeSearchText() => _workspace?.Active?.SearchText;
+
+    private void PersistNodeSearchText()
+    {
+        var document = _workspace?.Active;
+        if (document == null) return;
+        document.SearchText = TxtSearch.Text;
+        document.SearchIndex = _packageViewExtensions.SearchIndex;
     }
 
     private void TxtSearch_TextChanged(object sender, EventArgs e)
     {
+        if (_syncingSearch) return;
         if (_leftMode != WorkspaceLeftMode.Files) return;
+        _fileFilterText = TxtSearch.Text;
         RebuildWorkspaceTree();
+    }
+
+    /// <summary>The file count lives in the search placeholder and the mode tooltip, not in a row.</summary>
+    private void UpdateFileCountHint()
+    {
+        if (TxtSearch == null) return;
+        var count = _workspace?.FileCount ?? 0;
+        var opened = _workspace?.DocumentCount ?? 0;
+        TxtSearch.PlaceholderText = _leftMode == WorkspaceLeftMode.Files
+            ? $"搜索 FNG 文件（共 {count} 个）..."
+            : "搜索节点...";
+        if (_layoutToolTip != null && _filesModeButton != null)
+            _layoutToolTip.SetToolTip(_filesModeButton,
+                $"工作区 {count} 个 FNG，已打开 {opened} 个。\n状态点：灰=未打开，绿=已打开，蓝=当前文档，红=文件缺失");
     }
 
     private bool MatchesWorkspaceFilter(WorkspaceFile file, string filter)
@@ -548,14 +682,24 @@ public partial class PackageView
     {
         if (_workspaceTree == null) return;
         var filter = (_leftMode == WorkspaceLeftMode.Files ? TxtSearch.Text : "")?.Trim() ?? "";
+        var sortByName = _fileSortCombo != null && _fileSortCombo.SelectedIndex == 1;
+        var duplicateNames = new HashSet<string>(
+            _workspace.Files.GroupBy(file => file.Caption, StringComparer.OrdinalIgnoreCase)
+                .Where(group => group.Count() > 1)
+                .Select(group => group.Key),
+            StringComparer.OrdinalIgnoreCase);
+
         _workspaceTree.BeginUpdate();
         try
         {
             _workspaceTree.Nodes.Clear();
             _workspaceNodes.Clear();
+            _workspaceNodeCaptions.Clear();
+            _workspaceNodeWidths.Clear();
             foreach (var group in _workspace.Groups)
             {
                 var files = group.Files.Where(file => MatchesWorkspaceFilter(file, filter)).ToList();
+                if (sortByName) files = files.OrderBy(file => file.Caption, StringComparer.OrdinalIgnoreCase).ToList();
                 if (files.Count == 0 && filter.Length > 0) continue;
                 var root = new TreeNode($"{group.Name} ({files.Count})")
                 {
@@ -564,16 +708,27 @@ public partial class PackageView
                     ToolTipText = $"{group.Name}：{group.Files.Count} 个 FNG"
                 };
                 _workspaceTree.Nodes.Add(root);
+                RememberNodeCaption(root, $"{group.Name} ({files.Count})");
                 foreach (var file in files.Take(WorkspaceNodeLimit))
                 {
-                    var node = new TreeNode(file.Caption) { Name = file.Path, Tag = file };
+                    var caption = file.Caption;
+                    // Same file name in different folders must stay distinguishable without hovering.
+                    if (duplicateNames.Contains(file.Caption))
+                        caption += "  ·  " + ParentFolderName(file.Path);
+                    var node = new TreeNode(caption) { Name = file.Path, Tag = file };
                     ApplyWorkspaceNodeState(node, file);
+                    RememberNodeCaption(node, caption);
                     root.Nodes.Add(node);
                     _workspaceNodes[file.Path] = node;
                 }
 
                 if (files.Count > WorkspaceNodeLimit)
-                    root.Nodes.Add(new TreeNode($"… 其余 {files.Count - WorkspaceNodeLimit} 个文件，请用搜索过滤"));
+                {
+                    var more = $"— 其余 {files.Count - WorkspaceNodeLimit} 个文件，请用搜索过滤 —";
+                    root.Nodes.Add(new TreeNode(more) { ForeColor = SystemColors.GrayText });
+                    RememberNodeCaption(root.Nodes[^1], more);
+                }
+
                 root.Expand();
             }
         }
@@ -582,7 +737,60 @@ public partial class PackageView
             _workspaceTree.EndUpdate();
         }
 
+        ApplyWorkspaceNodeTextWidths();
         RevealActiveWorkspaceNode();
+    }
+
+    private static string ParentFolderName(string path)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(path);
+            return string.IsNullOrEmpty(directory) ? "" : new DirectoryInfo(directory).Name;
+        }
+        catch (Exception)
+        {
+            return "";
+        }
+    }
+
+    private void RememberNodeCaption(TreeNode node, string caption)
+    {
+        _workspaceNodeCaptions[node] = caption;
+        var width = TextRenderer.MeasureText(caption, _workspaceTree.Font,
+            new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width;
+        _workspaceNodeWidths[node] = width;
+    }
+
+    /// <summary>Long names are shortened with an ellipsis; the full name stays in the tooltip.</summary>
+    private void ApplyWorkspaceNodeTextWidths()
+    {
+        if (_workspaceTree == null || _workspaceNodeCaptions.Count == 0) return;
+        if (!_workspaceTree.Visible) return;
+        var available = Math.Max(60, _workspaceTree.ClientSize.Width - 26);
+        var changed = false;
+        foreach (var pair in _workspaceNodeCaptions)
+        {
+            var node = pair.Key;
+            var caption = pair.Value;
+            var width = _workspaceNodeWidths.TryGetValue(node, out var measured) ? measured : 0;
+            var text = Ellipsize(caption, width, available);
+            if (!string.Equals(node.Text, text, StringComparison.Ordinal))
+            {
+                node.Text = text;
+                changed = true;
+            }
+        }
+
+        if (changed) _workspaceTree.Invalidate();
+    }
+
+    private static string Ellipsize(string text, int measuredWidth, int maxWidth)
+    {
+        if (measuredWidth <= maxWidth || text.Length <= 2) return text;
+        var keep = (int)Math.Floor((text.Length - 1) * Math.Max(8, maxWidth - 8) / (double)measuredWidth);
+        keep = Math.Clamp(keep, 1, text.Length - 1);
+        return text[..keep] + "…";
     }
 
     private void UpdateWorkspaceNodeStates()
@@ -605,10 +813,11 @@ public partial class PackageView
             : document == null ? "idle"
             : isActive ? "active" : "open";
         node.NodeFont = document == null ? null : _boldNodeFont;
-        var tooltip = file.Path;
-        if (file.IsMissing) tooltip += "（文件缺失）";
-        else if (document != null) tooltip += document.IsDirty ? "（已打开，未保存）" : "（已打开）";
-        else tooltip += "（未打开）";
+        var tooltip = file.Caption + "\n" + file.Path;
+        if (file.IsMissing) tooltip += "\n状态：文件缺失（红点）";
+        else if (document == null) tooltip += "\n状态：未打开（灰点）";
+        else if (isActive) tooltip += document.IsDirty ? "\n状态：当前文档，未保存（蓝点）" : "\n状态：当前文档（蓝点）";
+        else tooltip += document.IsDirty ? "\n状态：已打开，未保存（绿点）" : "\n状态：已打开（绿点）";
         node.ToolTipText = tooltip;
     }
 

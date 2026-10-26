@@ -1,25 +1,56 @@
-﻿using System.Windows.Forms;
+using System;
+using System.Drawing;
+using System.Windows.Forms;
 using FEngLib.Structures;
 using FEngRender.Data;
 using FEngRender.GL;
 using JetBrains.Annotations;
+using SharpGL.Enumerations;
 
 namespace FEngViewer;
 
 public partial class GLRenderControl : UserControl, IRenderControl
 {
     private GLRenderTreeRenderer _renderer;
-        
-    [CanBeNull] private RenderTree _renderTree;
 
-    public Color4 BackgroundColor
-    {
-        set => _renderer.SetBackgroundColor(value);
-    }
-        
+    [CanBeNull] private RenderTree _renderTree;
+    private PreviewScaleMode _previewScale = PreviewScaleMode.Fit;
+    private Rectangle _previewViewport = new(0, 0, PreviewLayout.LogicalWidth, PreviewLayout.LogicalHeight);
+
     public GLRenderControl()
     {
         InitializeComponent();
+
+        // Let the GL surface line up exactly with this control so mouse coordinates map 1:1.
+        openglControl1.Margin = Padding.Empty;
+        Resize += (_, _) => UpdatePreviewViewport();
+        UpdatePreviewViewport();
+    }
+
+    /// <summary>Raised when the letterbox rectangle changes, so the status strip can show the scale.</summary>
+    public event EventHandler PreviewViewportChanged;
+
+    /// <summary>Rectangle (control pixels) occupied by the logical 640x480 canvas.</summary>
+    public Rectangle PreviewViewport => _previewViewport;
+
+    public PreviewScaleMode PreviewScale
+    {
+        get => _previewScale;
+        set
+        {
+            if (_previewScale == value) return;
+            _previewScale = value;
+            UpdatePreviewViewport();
+            Invalidate();
+        }
+    }
+
+    /// <summary>Maps a control-space point into the logical 640x480 HUD space.</summary>
+    public PointF ScreenToLogical(Point point) => PreviewLayout.ScreenToLogical(point, _previewViewport);
+
+    public Color4 BackgroundColor
+    {
+        set => _renderer?.SetBackgroundColor(value);
     }
 
     public RenderTreeNode SelectedNode
@@ -27,7 +58,7 @@ public partial class GLRenderControl : UserControl, IRenderControl
         get => _renderer?.SelectedNode;
         set { if (_renderer != null) _renderer.SelectedNode = value; }
     }
-        
+
     public void Init(string textureDir)
     {
         _renderer?.LoadTextures(textureDir);
@@ -38,7 +69,17 @@ public partial class GLRenderControl : UserControl, IRenderControl
         _renderTree = renderTree;
     }
 
-    private void openglControl1_OpenGLInitialized(object sender, System.EventArgs e)
+    private void UpdatePreviewViewport()
+    {
+        var viewport = PreviewLayout.ComputeViewport(
+            new Size(Math.Max(1, ClientSize.Width), Math.Max(1, ClientSize.Height)), _previewScale);
+        if (viewport == _previewViewport) return;
+        _previewViewport = viewport;
+        PreviewViewportChanged?.Invoke(this, EventArgs.Empty);
+        Invalidate();
+    }
+
+    private void openglControl1_OpenGLInitialized(object sender, EventArgs e)
     {
         _renderer = new GLRenderTreeRenderer(openglControl1.OpenGL);
         _renderer.PrepareRender();
@@ -46,19 +87,49 @@ public partial class GLRenderControl : UserControl, IRenderControl
 
     private void openglControl1_OpenGLDraw(object sender, SharpGL.RenderEventArgs args)
     {
+        var gl = openglControl1.OpenGL;
+        if (_renderer == null)
+        {
+            gl.Clear(SharpGL.OpenGL.GL_COLOR_BUFFER_BIT | SharpGL.OpenGL.GL_DEPTH_BUFFER_BIT);
+            return;
+        }
+
+        ApplyViewport(gl);
         if (_renderTree != null)
             _renderer.Render(_renderTree);
         else
-            openglControl1.OpenGL.Clear(SharpGL.OpenGL.GL_COLOR_BUFFER_BIT | SharpGL.OpenGL.GL_DEPTH_BUFFER_BIT);
+            gl.Clear(SharpGL.OpenGL.GL_COLOR_BUFFER_BIT | SharpGL.OpenGL.GL_DEPTH_BUFFER_BIT);
+    }
+
+    /// <summary>
+    /// The renderer always draws in the fixed 640x480 logical space. The viewport decides where and
+    /// how large that space appears, which keeps the 4:3 aspect without touching FNG coordinates.
+    /// </summary>
+    private void ApplyViewport(SharpGL.OpenGL gl)
+    {
+        var client = openglControl1.ClientSize;
+        var width = Math.Max(1, client.Width);
+        var height = Math.Max(1, client.Height);
+        var viewport = PreviewLayout.ComputeViewport(new Size(width, height), _previewScale);
+        _previewViewport = viewport;
+
+        gl.MatrixMode(MatrixMode.Projection);
+        gl.LoadIdentity();
+        gl.Ortho(0, PreviewLayout.LogicalWidth, PreviewLayout.LogicalHeight, 0, -1, 1);
+        gl.Viewport(viewport.X, height - (viewport.Y + viewport.Height),
+            Math.Max(1, viewport.Width), Math.Max(1, viewport.Height));
+        gl.MatrixMode(MatrixMode.Modelview);
+        gl.LoadIdentity();
     }
 
     private void openglControl1_MouseMove(object sender, MouseEventArgs e)
     {
-        OnMouseMove(e);
+        // The GL surface margin is zero; adding its offset keeps the mapping correct if that changes.
+        OnMouseMove(new MouseEventArgs(e.Button, e.Clicks, e.X + openglControl1.Left, e.Y + openglControl1.Top, e.Delta));
     }
 
     private void openglControl1_MouseClick(object sender, MouseEventArgs e)
     {
-        OnMouseClick(e);
+        OnMouseClick(new MouseEventArgs(e.Button, e.Clicks, e.X + openglControl1.Left, e.Y + openglControl1.Top, e.Delta));
     }
 }

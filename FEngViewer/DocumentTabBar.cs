@@ -28,13 +28,19 @@ internal sealed class DocumentTabBar : Control
         public bool HasError { get; }
     }
 
-    private const int TabTop = 3;
-    private const int MinTabWidth = 96;
-    private const int MaxTabWidth = 220;
-    private const int TabPadding = 9;
-    private const int CloseBoxSize = 14;
-    private const int ButtonSize = 20;
-    private const int ScrollButtonWidth = 18;
+    // All strip metrics follow the control font so a DPI-scaled UI does not clip the tab text.
+    private int LineHeight => Math.Max(9, Font.Height);
+    private int TabTop => Math.Max(2, LineHeight / 6);
+    private int MinTabWidth => Math.Max(80, LineHeight * 5);
+    private int MaxTabWidth => Math.Max(160, LineHeight * 12);
+    private int TabPadding => Math.Max(6, LineHeight / 2);
+    private int CloseBoxSize => Math.Max(12, LineHeight - 2);
+    private int ButtonSize => Math.Max(18, LineHeight + 4);
+    private int ScrollButtonWidth => Math.Max(16, LineHeight + 2);
+    private int TabGap => Math.Max(2, LineHeight / 8);
+
+    /// <summary>Height the strip wants for the current font.</summary>
+    public int PreferredHeight => LineHeight + 16;
 
     private readonly List<Item> _items = new();
     private readonly List<int> _widths = new();
@@ -73,6 +79,14 @@ internal sealed class DocumentTabBar : Control
     public event Action NewTabRequested;
     public event Action<Point> MenuRequested;
     public event Action<int, int> ReorderRequested;
+
+    protected override void OnFontChanged(EventArgs e)
+    {
+        base.OnFontChanged(e);
+        _hoverIndex = -1;
+        MeasureTabs();
+        Invalidate();
+    }
 
     public int ItemCount => _items.Count;
 
@@ -141,14 +155,14 @@ internal sealed class DocumentTabBar : Control
         }
     }
 
-    private int ContentWidth => _widths.Sum() + Math.Max(0, _widths.Count - 1) * 2;
+    private int ContentWidth => _widths.Sum() + Math.Max(0, _widths.Count - 1) * TabGap;
 
     private int MaxScrollOffset => Math.Max(0, ContentWidth - AvailableWidth);
 
     private int TabLeft(int index)
     {
         var x = -_scrollOffset;
-        for (var i = 0; i < index && i < _widths.Count; i++) x += _widths[i] + 2;
+        for (var i = 0; i < index && i < _widths.Count; i++) x += _widths[i] + TabGap;
         return x;
     }
 
@@ -276,7 +290,8 @@ internal sealed class DocumentTabBar : Control
                 g.FillRectangle(accent, rect.Left, rect.Top, rect.Width, 2);
 
         var close = CloseRect(index);
-        var textRect = new Rectangle(rect.Left + TabPadding, rect.Top + 2, Math.Max(0, close.Left - rect.Left - TabPadding - 4), rect.Height - 4);
+        var textRect = new Rectangle(rect.Left + TabPadding, rect.Top + 2,
+            Math.Max(0, close.Left - rect.Left - TabPadding - TabGap * 2), rect.Height - 4);
         var color = item.HasError ? Color.Firebrick : SystemColors.ControlText;
         TextRenderer.DrawText(g, item.Caption, Font, textRect, color,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
@@ -290,7 +305,7 @@ internal sealed class DocumentTabBar : Control
             using (var background = new SolidBrush(Color.FromArgb(198, 48, 34)))
                 g.FillRectangle(background, rect);
 
-        var inset = 4;
+        var inset = Math.Max(3, CloseBoxSize / 4);
         using var pen = new Pen(hot ? Color.White : Color.FromArgb(120, 120, 120), 1.4f);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.DrawLine(pen, rect.Left + inset, rect.Top + inset, rect.Right - inset, rect.Bottom - inset);
@@ -315,25 +330,26 @@ internal sealed class DocumentTabBar : Control
 
         var centerX = rect.Left + rect.Width / 2;
         var centerY = rect.Top + rect.Height / 2;
+        var arm = Math.Max(4, ButtonSize / 4);
         using var pen = new Pen(SystemColors.ControlText, 1.5f);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         switch (glyph)
         {
             case ButtonGlyph.Plus:
-                g.DrawLine(pen, centerX - 5, centerY, centerX + 5, centerY);
-                g.DrawLine(pen, centerX, centerY - 5, centerX, centerY + 5);
+                g.DrawLine(pen, centerX - arm, centerY, centerX + arm, centerY);
+                g.DrawLine(pen, centerX, centerY - arm, centerX, centerY + arm);
                 break;
             case ButtonGlyph.Chevron:
-                g.DrawLine(pen, centerX - 4, centerY - 1, centerX, centerY + 3);
-                g.DrawLine(pen, centerX, centerY + 3, centerX + 4, centerY - 1);
+                g.DrawLine(pen, centerX - arm, centerY - 1, centerX, centerY + arm - 1);
+                g.DrawLine(pen, centerX, centerY + arm - 1, centerX + arm, centerY - 1);
                 break;
             case ButtonGlyph.Left:
-                g.DrawLine(pen, centerX + 2, centerY - 4, centerX - 2, centerY);
-                g.DrawLine(pen, centerX - 2, centerY, centerX + 2, centerY + 4);
+                g.DrawLine(pen, centerX + arm / 2, centerY - arm, centerX - arm / 2, centerY);
+                g.DrawLine(pen, centerX - arm / 2, centerY, centerX + arm / 2, centerY + arm);
                 break;
             case ButtonGlyph.Right:
-                g.DrawLine(pen, centerX - 2, centerY - 4, centerX + 2, centerY);
-                g.DrawLine(pen, centerX + 2, centerY, centerX - 2, centerY + 4);
+                g.DrawLine(pen, centerX - arm / 2, centerY - arm, centerX + arm / 2, centerY);
+                g.DrawLine(pen, centerX + arm / 2, centerY, centerX - arm / 2, centerY + arm);
                 break;
         }
 
@@ -409,7 +425,7 @@ internal sealed class DocumentTabBar : Control
         for (var i = 0; i < _widths.Count; i++)
         {
             if (position < cursor + _widths[i] / 2) return i;
-            cursor += _widths[i] + 2;
+            cursor += _widths[i] + TabGap;
         }
 
         return _widths.Count;
