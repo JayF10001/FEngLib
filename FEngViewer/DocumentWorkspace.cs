@@ -31,6 +31,18 @@ internal interface IWorkspacePrompts
     void ShowError(string title, string message);
 }
 
+internal sealed class WorkspaceSaveContext : EventArgs
+{
+    public WorkspaceDocument Document { get; init; }
+    public string PreviousPath { get; init; }
+    public string TargetPath { get; init; }
+    public bool IsJson { get; init; }
+    public bool Succeeded { get; set; }
+    public string Error { get; set; }
+    public string Warning { get; set; }
+    public object RecoveryState { get; set; }
+}
+
 /// <summary>One FNG known to the session. Being in the workspace does not mean it is parsed or open.</summary>
 internal sealed class WorkspaceFile
 {
@@ -102,6 +114,8 @@ internal sealed class DocumentWorkspace
 
     /// <summary>A document was saved to disk; the file is final and its hash can be recorded.</summary>
     public event EventHandler<WorkspaceDocument> Saved;
+    public event EventHandler<WorkspaceSaveContext> Saving;
+    public event EventHandler<WorkspaceSaveContext> SaveFinished;
 
     public IReadOnlyList<WorkspaceDocument> Documents => _documents;
     public IReadOnlyList<WorkspaceGroup> Groups => _groups;
@@ -393,11 +407,25 @@ internal sealed class DocumentWorkspace
         }
 
         var previousPath = document.FilePath;
-        if (!_prompts.WritePackage(document, path, isJson, offerOpenFolder: chooseTarget)) return false;
+        var save = new WorkspaceSaveContext { Document = document, PreviousPath = previousPath, TargetPath = path, IsJson = isJson };
+        Saving?.Invoke(this, save);
+        if (!string.IsNullOrWhiteSpace(save.Error))
+        {
+            _prompts.ShowError("保存尚未开始", save.Error);
+            return false;
+        }
+        if (!_prompts.WritePackage(document, path, isJson, offerOpenFolder: chooseTarget))
+        {
+            SaveFinished?.Invoke(this, save);
+            return false;
+        }
 
         document.MarkSaved(path, isJson);
+        save.Succeeded = true;
+        SaveFinished?.Invoke(this, save);
         Saved?.Invoke(this, document);
-        StatusMessage = $"已保存 {Path.GetFileName(path)}";
+        StatusMessage = $"已保存 {Path.GetFileName(path)}" + (save.Warning == null ? "" : "；" + save.Warning);
+        if (save.Warning != null) _prompts.ShowError("FNG 已保存，容器登记需要处理", save.Warning);
         if (!PathEquals(previousPath, path) && TrackSavedCopy(previousPath, document))
             Changed?.Invoke(this, EventArgs.Empty);
         StateChanged?.Invoke(this, EventArgs.Empty);

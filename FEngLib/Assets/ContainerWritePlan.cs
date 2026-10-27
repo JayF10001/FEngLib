@@ -32,7 +32,7 @@ public sealed class WriteBackPlanBlock
 }
 
 /// <summary>
-/// Immutable write-back plan. Everything it needs is frozen at build time: the working copy
+/// Write-back plan snapshot. Inputs are fingerprinted at build time: the working copy
 /// fingerprint, the replacement file hashes, and the expected block layout of the result.
 /// Executing a stale plan fails instead of adapting.
 /// </summary>
@@ -44,6 +44,7 @@ public sealed class ContainerWritePlan
     public long WorkingCopyLength { get; set; }
     public string WorkingCopySha256 { get; set; }
     public int BlockCount { get; set; }
+    public int PendingChangeCount { get; internal set; }
     public string BackupPath { get; set; }
     public List<WriteBackPlanItem> Items { get; set; } = new();
     public List<WriteBackPlanBlock> ExpectedBlocks { get; set; } = new();
@@ -51,10 +52,11 @@ public sealed class ContainerWritePlan
     public List<string> Notes { get; } = new();
 
     public bool IsExecutable => Blockers.Count == 0 && Items.Count > 0 && Items.All(i => i.IsRunnable);
-    public bool HasPendingChanges => Items.Count > 0;
+    public bool HasPendingChanges => PendingChangeCount > 0;
+    public bool IsBlocked => Blockers.Count > 0 || Items.Any(i => !i.IsRunnable);
 }
 
-/// <summary>Builds and validates a write-back plan from a container session. Reads only.</summary>
+/// <summary>Reconciles unfinished operations, then builds and validates a write-back plan.</summary>
 public static class ContainerWritePlanner
 {
     public static ContainerWritePlan Build(ContainerSession session)
@@ -71,6 +73,9 @@ public static class ContainerWritePlanner
 
         foreach (var line in WriteBackJournal.Recover(session))
             plan.Notes.Add(line);
+        session.RecoverSaves();
+        plan.Blockers.AddRange(session.SaveRecoveryProblems);
+        plan.PendingChangeCount = session.Bindings.Count(b => b.HasSavedChange);
 
         if (WriteBackJournal.Load(session.SessionDirectory)
                 .Any(e => e.Status is WriteBackJournal.StatusPrepared or WriteBackJournal.StatusPublished))
@@ -91,6 +96,8 @@ public static class ContainerWritePlanner
             plan.Blockers.Add($"工作副本不存在: {session.WorkingCopyPath}");
             return plan;
         }
+        if (ContainerSession.PathsEqual(session.WorkingCopyPath, session.OriginalPath))
+            plan.Blockers.Add("工作副本不能指向原始容器。");
 
         try
         {
@@ -276,6 +283,9 @@ public static class ContainerWritePlanner
         if (id != FngContainer.FngChunkId && id != FngContainer.CompressedFngChunkId)
             throw new InvalidDataException($"Not an FNG block (chunk id 0x{id:X8}).");
         stream.Position = 8;
-        return FngContainer.ReadEntry(reader, 0, id, payloadLength);
+        var entry = FngContainer.ReadEntry(reader, 0, id, payloadLength);
+        if (entry.Storage == FngStorageKind.Uncompressed)
+            FngWriteBackValidator.Validate(stream, 0, stream.Length, entry.Name);
+        return entry;
     }
 }

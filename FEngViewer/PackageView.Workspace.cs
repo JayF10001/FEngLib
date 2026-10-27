@@ -91,7 +91,10 @@ public partial class PackageView
         _workspace = new DocumentWorkspace(new WorkspacePrompts(this));
         _writeBack = new ContainerWriteBackCoordinator();
         _writeBack.PendingChanged += (_, _) => RefreshWorkspaceStructure();
-        _workspace.Saved += (_, document) => _writeBack.RecordSaved(document);
+        _workspace.Saving += (_, save) => _writeBack.PrepareSave(save);
+        _workspace.SaveFinished += (_, save) => _writeBack.FinishSave(save);
+        _writeBack.ConfirmVersionSwitch = message => MessageBox.Show(this, message,
+            "切换待写回版本", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
         _boldNodeFont = new Font(treeView1.Font, FontStyle.Bold);
 
         BuildShell();
@@ -1146,7 +1149,14 @@ public partial class PackageView
             return;
         }
 
-        var session = _writeBack.SessionForFile(document.FilePath);
+        ContainerSession session;
+        try { session = _writeBack.SessionForDocument(document); }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, "容器来源或恢复记录无法读取：\n" + error.Message,
+                "写回容器副本", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
         if (session == null)
         {
             MessageBox.Show(this,
@@ -1156,9 +1166,20 @@ public partial class PackageView
             return;
         }
 
-        var unsaved = _workspace.Documents
-            .Where(d => d.IsDirty && SameDirectory(d.FilePath, session.SessionDirectory))
-            .ToList();
+        List<WorkspaceDocument> unsaved;
+        try
+        {
+            unsaved = _workspace.Documents
+                .Where(d => d.IsDirty && ContainerSession.PathsEqual(
+                    _writeBack.SessionForDocument(d)?.SessionDirectory, session.SessionDirectory))
+                .ToList();
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, "无法核对未保存文档的来源，写回已取消：\n" + error.Message,
+                "写回容器副本", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
         if (unsaved.Count > 0)
         {
             var answer = MessageBox.Show(this,
@@ -1215,7 +1236,7 @@ public partial class PackageView
             return;
         }
 
-        if (!plan.HasPendingChanges)
+        if (!plan.HasPendingChanges && !plan.IsBlocked)
         {
             MessageBox.Show(this, "此容器当前没有待写回的已保存修改。", "写回容器副本",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -1236,10 +1257,19 @@ public partial class PackageView
         }
         catch (Exception error)
         {
+            var evidence = (error as ContainerWriteBackException)?.Report;
+            var detail = evidence?.Published == true
+                ? "副本已发布，但后续验证或登记未完成。请核对恢复记录，不要盲目重复写回。"
+                : "本次操作未发布候选副本。";
+            if (evidence?.BackupPath != null) detail += "\n备份: " + evidence.BackupPath;
+            if (evidence != null) detail += "\n副本: " + evidence.WorkingCopyPath + "\n日志 ID: " + evidence.JournalId;
+            detail += "\n恢复日志: " + WriteBackJournal.JournalFilePath(session.SessionDirectory);
+            _writeBack.Invalidate(session);
+            _writeBack.NotifyPendingChanged();
             MessageBox.Show(this,
-                "写回失败，工作副本保持原样（本次操作前已有备份可恢复）：\n" + error.Message,
+                detail + "\n" + error.Message,
                 "写回容器副本", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            _workspace.StatusMessage = "容器写回失败";
+            _workspace.StatusMessage = evidence?.Published == true ? "副本已发布，后续验证或登记待恢复" : "本次写回未发布候选副本";
             return;
         }
         finally
@@ -1257,19 +1287,6 @@ public partial class PackageView
         MessageBox.Show(this,
             $"{summary}\n\n工作副本: {report.WorkingCopyPath}\n备份: {report.BackupPath}",
             "写回容器副本", MessageBoxButtons.OK, MessageBoxIcon.Information);
-    }
-
-    private static bool SameDirectory(string left, string right)
-    {
-        try
-        {
-            return string.Equals(Path.GetDirectoryName(Path.GetFullPath(left)),
-                Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
-        }
-        catch (Exception)
-        {
-            return false;
-        }
     }
 
     private void ReloadActiveDocument()

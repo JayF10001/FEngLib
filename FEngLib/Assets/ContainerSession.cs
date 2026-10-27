@@ -35,11 +35,11 @@ public sealed class ContainerFngBinding
     [JsonIgnore] public string WriteBackTargetSha256 => LastWriteBackSha256 ?? ExtractedSha256;
     [JsonIgnore] public bool HasSavedChange => SavedSha256 != null && SavedSha256 != WriteBackTargetSha256;
 
-    public void RecordSaved(string path, string sha256)
+    public void RecordSaved(string path, string sha256, DateTimeOffset? savedAt = null)
     {
         CurrentFile = path;
         SavedSha256 = sha256;
-        SavedAt = DateTimeOffset.UtcNow;
+        SavedAt = savedAt ?? DateTimeOffset.UtcNow;
     }
 }
 
@@ -78,23 +78,28 @@ public sealed class ContainerSession
     public List<ContainerWriteBackRecord> History { get; set; } = new();
 
     [JsonIgnore] public string SessionDirectory { get; private set; }
+    [JsonIgnore] public IReadOnlyList<string> SaveRecoveryProblems { get; private set; } = Array.Empty<string>();
+
+    public void RecoverSaves() => SaveRecoveryProblems = ContainerSaveReceipt.Recover(this);
 
     public static string SessionFilePath(string extractionDirectory)
         => Path.Combine(Path.GetFullPath(extractionDirectory), SessionFileName);
 
     public static bool ExistsIn(string extractionDirectory)
-        => File.Exists(SessionFilePath(extractionDirectory));
+        => File.Exists(SessionFilePath(extractionDirectory)) || File.Exists(SessionFilePath(extractionDirectory) + ".tmp");
 
     /// <summary>Loads an existing session; throws when none or when the file is unusable.</summary>
     public static ContainerSession Load(string extractionDirectory)
     {
         var path = SessionFilePath(extractionDirectory);
+        AtomicJsonFile.RecoverLegacyTemporary(path);
         var session = JsonSerializer.Deserialize<ContainerSession>(File.ReadAllText(path))
             ?? throw new InvalidDataException($"Empty container session file: {path}");
         session.SessionDirectory = Path.GetFullPath(extractionDirectory);
         if (string.IsNullOrWhiteSpace(session.OriginalPath) ||
             string.IsNullOrWhiteSpace(session.OriginalSha256))
             throw new InvalidDataException($"Container session is missing its original container binding: {path}");
+        session.RecoverSaves();
         return session;
     }
 
@@ -238,10 +243,42 @@ public sealed class ContainerSession
         if (SessionDirectory == null)
             throw new InvalidOperationException("Session was not loaded or registered through a directory.");
         var path = SessionFilePath(SessionDirectory);
-        var temporary = path + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
-        if (File.Exists(path)) File.Delete(path);
-        File.Move(temporary, path);
+        AtomicJsonFile.Write(path, this);
+    }
+
+    internal void CompleteWriteBack(WriteBackJournalEntry entry)
+    {
+        var previousHash = WorkingCopySha256;
+        var previous = Bindings.Select(b => b.LastWriteBackSha256).ToArray();
+        var historyCount = History.Count;
+        try
+        {
+            foreach (var item in entry.Items)
+            {
+                var binding = Bindings.SingleOrDefault(b => b.BlockOffset == item.BlockOffset)
+                    ?? throw new InvalidDataException($"日志指向未绑定块 0x{item.BlockOffset:X}。");
+                binding.LastWriteBackSha256 = item.ReplacementSha256;
+            }
+            WorkingCopySha256 = entry.WorkingCopySha256Result;
+            if (!History.Any(h => h.JournalId == entry.Id))
+                History.Add(new ContainerWriteBackRecord
+                {
+                    At = DateTimeOffset.UtcNow,
+                    WorkingCopySha256Before = entry.WorkingCopySha256Before,
+                    WorkingCopySha256After = entry.WorkingCopySha256Result,
+                    BackupPath = entry.BackupPath,
+                    PackageNames = entry.Items.Select(i => i.PackageName).ToList(),
+                    JournalId = entry.Id
+                });
+            Save();
+        }
+        catch
+        {
+            WorkingCopySha256 = previousHash;
+            for (var i = 0; i < Bindings.Count; i++) Bindings[i].LastWriteBackSha256 = previous[i];
+            if (History.Count > historyCount) History.RemoveRange(historyCount, History.Count - historyCount);
+            throw;
+        }
     }
 
     public static bool PathsEqual(string left, string right)

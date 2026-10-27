@@ -89,6 +89,7 @@ internal sealed class WriteBackPreviewDialog : Form
         lines.Add($"输入副本 SHA256    : {plan.WorkingCopySha256 ?? "—"}");
         lines.Add($"备份位置           : {plan.BackupPath ?? "—"}");
         lines.Add($"容器块             : {plan.BlockCount} 个，本次替换 {plan.Items.Count(i => i.IsRunnable)} 个");
+        lines.Add($"账本待写回         : {plan.PendingChangeCount} 个（预检阻断时也会保留计数）");
         lines.Add("");
         foreach (var item in plan.Items.Where(i => i.IsRunnable))
         {

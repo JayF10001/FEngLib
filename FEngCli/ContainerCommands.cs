@@ -133,5 +133,5 @@ public sealed class ExtractContainerCommand : BaseCommand
 internal static class ContainerCommandErrors
 {
     public static bool IsExpected(Exception error) => error is IOException or InvalidDataException or UnauthorizedAccessException or
-        NotSupportedException or ArgumentException or InvalidOperationException or FormatException or OverflowException;
+        NotSupportedException or ArgumentException or InvalidOperationException or FormatException or OverflowException or System.Text.Json.JsonException;
 }

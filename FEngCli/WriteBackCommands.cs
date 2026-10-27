@@ -93,7 +93,7 @@ public sealed class WriteBackRecordCommand : BaseCommand
     }
 }
 
-[Verb("writeback-plan", HelpText = "Build and validate the write-back plan for a session; modifies nothing.")]
+[Verb("writeback-plan", HelpText = "Reconcile recovery records and validate a plan; does not modify container files.")]
 public sealed class WriteBackPlanCommand : BaseCommand
 {
     [Option('e', "extract-dir", Required = true)] public string ExtractDirectory { get; set; }
@@ -107,7 +107,7 @@ public sealed class WriteBackPlanCommand : BaseCommand
             var session = ContainerSession.Load(ExtractDirectory);
             var plan = ContainerWritePlanner.Build(session);
             Write(plan);
-            return plan.IsExecutable ? 0 : plan.HasPendingChanges ? 2 : 0;
+            return plan.IsBlocked ? 2 : 0;
         }
         catch (Exception error) when (ContainerCommandErrors.IsExpected(error))
         {
@@ -120,7 +120,8 @@ public sealed class WriteBackPlanCommand : BaseCommand
     {
         var json = JsonConvert.SerializeObject(new
         {
-            Status = plan.IsExecutable ? "executable" : plan.HasPendingChanges ? "blocked" : "nothing-pending",
+            Status = plan.IsBlocked ? "blocked" : plan.IsExecutable ? "executable" : "nothing-pending",
+            plan.PendingChangeCount,
             plan.CreatedAt,
             plan.OriginalPath,
             plan.WorkingCopyPath,
@@ -163,7 +164,8 @@ public sealed class WriteBackExecuteCommand : BaseCommand
             {
                 Console.WriteLine(JsonConvert.SerializeObject(new
                 {
-                    Status = plan.HasPendingChanges ? "blocked" : "nothing-pending",
+                    Status = plan.IsBlocked ? "blocked" : "nothing-pending",
+                    plan.PendingChangeCount,
                     plan.Blockers,
                     plan.Notes,
                     Items = plan.Items.Select(i => new
@@ -171,13 +173,13 @@ public sealed class WriteBackExecuteCommand : BaseCommand
                         i.PackageName, i.BlockOffset, i.Blockers, i.IsRunnable
                     })
                 }, Formatting.Indented, new StringEnumConverter()));
-                return plan.HasPendingChanges ? 2 : 0;
+                return plan.IsBlocked ? 2 : 0;
             }
 
             var report = ContainerWriteBackExecutor.Execute(session, plan);
             Console.WriteLine(JsonConvert.SerializeObject(new
             {
-                Status = "published",
+                Status = report.LedgerComplete ? "published" : "published-ledger-pending",
                 report.WorkingCopyPath,
                 report.BackupPath,
                 report.Sha256Before,
@@ -187,7 +189,20 @@ public sealed class WriteBackExecuteCommand : BaseCommand
                 report.Warnings,
                 report.Items
             }, Formatting.Indented, new StringEnumConverter()));
-            return 0;
+            return report.LedgerComplete ? 0 : 2;
+        }
+        catch (ContainerWriteBackException error)
+        {
+            Console.Error.WriteLine(JsonConvert.SerializeObject(new
+            {
+                Status = error.Report.Published ? "published-verification-pending" : "not-published",
+                Error = error.Message,
+                error.Report.WorkingCopyPath,
+                error.Report.BackupPath,
+                error.Report.JournalId,
+                RecoveryJournal = WriteBackJournal.JournalFilePath(ExtractDirectory)
+            }, Formatting.Indented));
+            return 2;
         }
         catch (Exception error) when (ContainerCommandErrors.IsExpected(error))
         {

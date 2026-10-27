@@ -48,6 +48,7 @@ public static class WriteBackJournal
     public static List<WriteBackJournalEntry> Load(string sessionDirectory)
     {
         var path = JournalFilePath(sessionDirectory);
+        AtomicJsonFile.RecoverLegacyTemporary(path);
         if (!File.Exists(path)) return new List<WriteBackJournalEntry>();
         var entries = JsonSerializer.Deserialize<List<WriteBackJournalEntry>>(File.ReadAllText(path));
         return entries ?? new List<WriteBackJournalEntry>();
@@ -56,10 +57,7 @@ public static class WriteBackJournal
     public static void Save(string sessionDirectory, List<WriteBackJournalEntry> entries)
     {
         var path = JournalFilePath(sessionDirectory);
-        var temporary = path + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(entries, new JsonSerializerOptions { WriteIndented = true }));
-        if (File.Exists(path)) File.Delete(path);
-        File.Move(temporary, path);
+        AtomicJsonFile.Write(path, entries);
     }
 
     /// <summary>
@@ -103,7 +101,7 @@ public static class WriteBackJournal
                 string.Equals(hash, entry.WorkingCopySha256Result, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(session.WorkingCopySha256, entry.WorkingCopySha256Before, StringComparison.OrdinalIgnoreCase))
             {
-                CompleteLedger(session, entry);
+                session.CompleteWriteBack(entry);
                 entry.Status = StatusCompleted;
                 entry.Detail = "恢复：副本已发布但登记缺失，已自动补全";
                 dirty = true;
@@ -136,28 +134,4 @@ public static class WriteBackJournal
         return report;
     }
 
-    private static void CompleteLedger(ContainerSession session, WriteBackJournalEntry entry)
-    {
-        foreach (var item in entry.Items)
-        {
-            var binding = session.Bindings.FirstOrDefault(b => b.BlockOffset == item.BlockOffset);
-            if (binding == null)
-                throw new InvalidDataException(
-                    $"Recovery failed: journal {entry.Id} targets unbound block 0x{item.BlockOffset:X}.");
-            binding.LastWriteBackSha256 = item.ReplacementSha256;
-        }
-
-        session.WorkingCopySha256 = entry.WorkingCopySha256Result;
-        session.History.Add(new ContainerWriteBackRecord
-        {
-            At = DateTimeOffset.UtcNow,
-            WorkingCopySha256Before = entry.WorkingCopySha256Before,
-            WorkingCopySha256After = entry.WorkingCopySha256Result,
-            BackupPath = entry.BackupPath,
-            PackageNames = entry.Items.Select(i => i.PackageName).ToList(),
-            JournalId = entry.Id,
-            LedgerComplete = true
-        });
-        session.Save();
-    }
 }

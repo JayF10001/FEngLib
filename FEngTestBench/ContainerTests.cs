@@ -481,6 +481,197 @@ internal static class ContainerTests
         File.Delete(WriteBackJournal.JournalFilePath(session.SessionDirectory));
         var finalPlan = ContainerWritePlanner.Build(session);
         check(!finalPlan.Blockers.Any(), "Clearing the journal did not unblock planning.");
+        RunWriteBackFailureChecks(root, check);
+    }
+
+    private static void RunWriteBackFailureChecks(string root, Action<bool, string> check)
+    {
+        var original = MakeFngWithObject("Faults.fng", 1f);
+        var edited = MakeFngWithObject("Faults.fng", 42f);
+        (ContainerSession Session, string File) Setup(string name)
+        {
+            var directory = Path.Combine(root, name);
+            Directory.CreateDirectory(directory);
+            var source = Path.Combine(directory, "source.bun");
+            File.WriteAllBytes(source, original);
+            var container = FngContainer.Open(source);
+            var extractDirectory = Path.Combine(directory, "extracted");
+            var file = container.Extract(container.Entries, extractDirectory).Single().OutputPath;
+            var session = ContainerSession.Register(source, extractDirectory).Session;
+            session.CreateWorkingCopy(Path.Combine(directory, "copy.bun"));
+            return (session, file);
+        }
+        void Record(ContainerSession session, string file, byte[] bytes)
+        {
+            File.WriteAllBytes(file, bytes);
+            session.FindByFile(file).RecordSaved(file, ContainerFileHash.OfFile(file));
+            session.Save();
+        }
+
+        var (invalid, invalidFile) = Setup("invalid-inner-model");
+        var nextChunk = 24 + BitConverter.ToInt32(edited, 20);
+        foreach (var corruption in new[] { "unknown-type", "negative-length", "out-of-bounds", "trailing-data" })
+        {
+            var bytes = (byte[])edited.Clone();
+            switch (corruption)
+            {
+                case "unknown-type": BitConverter.GetBytes(0xDEADBEEFu).CopyTo(bytes, nextChunk); break;
+                case "negative-length": BitConverter.GetBytes(-1).CopyTo(bytes, nextChunk + 4); break;
+                case "out-of-bounds": BitConverter.GetBytes(int.MaxValue).CopyTo(bytes, nextChunk + 4); break;
+                case "trailing-data": BitConverter.GetBytes(bytes.Length - 20).CopyTo(bytes, 12); break;
+            }
+            Record(invalid, invalidFile, bytes);
+            var plan = ContainerWritePlanner.Build(invalid);
+            check(plan.IsBlocked && !plan.IsExecutable, "Invalid internal model accepted: " + corruption);
+            check(File.ReadAllBytes(invalid.WorkingCopyPath).SequenceEqual(original), "Preflight changed the target.");
+        }
+
+        var (race, raceFile) = Setup("publish-race");
+        Record(race, raceFile, edited);
+        var external = (byte[])original.Clone();
+        external[^1] ^= 1;
+        ContainerWriteBackException failure = null;
+        try
+        {
+            ContainerWriteBackExecutor.Execute(race, ContainerWritePlanner.Build(race), step =>
+            {
+                if (step == "发布新副本") File.WriteAllBytes(race.WorkingCopyPath, external);
+            });
+        }
+        catch (ContainerWriteBackException error) { failure = error; }
+        check(failure != null && !failure.Report.Published, "External modification was not blocked before publication.");
+        check(File.ReadAllBytes(race.WorkingCopyPath).SequenceEqual(external), "External version was overwritten.");
+        check(failure.Report.BackupPath != null && File.Exists(failure.Report.BackupPath), "Failure lost backup evidence.");
+        check(race.Bindings.Single().HasSavedChange, "Rejected publication cleared pending state.");
+
+        var (post, postFile) = Setup("post-publish-lock");
+        Record(post, postFile, edited);
+        FileStream publishedLock = null;
+        failure = null;
+        try
+        {
+            ContainerWriteBackExecutor.Execute(post, ContainerWritePlanner.Build(post), step =>
+            {
+                if (step == "复核发布结果") publishedLock = File.Open(post.WorkingCopyPath, FileMode.Open, FileAccess.Read, FileShare.None);
+            });
+        }
+        catch (ContainerWriteBackException error) { failure = error; }
+        finally { publishedLock?.Dispose(); }
+        check(failure is { Report.Published: true, Report.Success: false, Report.LedgerComplete: false },
+            "Post-publication read failure lost its published state.");
+        check(File.ReadAllBytes(post.WorkingCopyPath).SequenceEqual(edited), "Published candidate unexpectedly absent.");
+        check(failure.Report.JournalId != null && File.Exists(failure.Report.BackupPath), "Published failure lost recovery evidence.");
+        var recovered = ContainerWritePlanner.Build(ContainerSession.Load(post.SessionDirectory));
+        check(!recovered.IsBlocked && !recovered.HasPendingChanges, "Published-but-unverified operation did not recover.");
+
+        var (ledger, ledgerFile) = Setup("ledger-failure-after-publish");
+        Record(ledger, ledgerFile, edited);
+        FileStream ledgerLock = null;
+        ContainerWriteBackReport report;
+        try
+        {
+            report = ContainerWriteBackExecutor.Execute(ledger, ContainerWritePlanner.Build(ledger), step =>
+            {
+                if (step == "复核发布结果") ledgerLock = File.Open(ContainerSession.SessionFilePath(ledger.SessionDirectory),
+                    FileMode.Open, FileAccess.Read, FileShare.Read);
+            });
+        }
+        finally { ledgerLock?.Dispose(); }
+        check(report.Published && report.Success && !report.LedgerComplete, "Ledger failure was not reported separately.");
+        check(ledger.Bindings.Single().HasSavedChange && ledger.WorkingCopySha256 == report.Sha256Before,
+            "Failed ledger publication left the in-memory session falsely committed.");
+        var ledgerRecovery = ContainerWritePlanner.Build(ledger);
+        check(!ledgerRecovery.IsBlocked && !ledger.Bindings.Single().HasSavedChange,
+            "Retry in the same session failed to complete the ledger.");
+        check(ContainerSession.Load(ledger.SessionDirectory).WorkingCopySha256 == report.Sha256After,
+            "Recovered ledger was not persisted.");
+
+        var (missing, missingFile) = Setup("missing-copy-pending");
+        Record(missing, missingFile, edited);
+        File.Move(missing.WorkingCopyPath, missing.WorkingCopyPath + ".moved");
+        var missingPlan = ContainerWritePlanner.Build(missing);
+        check(missingPlan.IsBlocked && missingPlan.HasPendingChanges && missingPlan.PendingChangeCount == 1 && missingPlan.Items.Count == 0,
+            "Global blocker hid the pending change count.");
+
+        var (save, saveFile) = Setup("durable-save-receipt");
+        var saveBinding = save.Bindings.Single();
+        var receipt = ContainerSaveReceipt.Prepare(save, saveBinding, saveFile);
+        File.WriteAllBytes(saveFile, edited);
+        receipt.Complete();
+        var sessionPath = ContainerSession.SessionFilePath(save.SessionDirectory);
+        var previousLedger = File.ReadAllBytes(sessionPath);
+        using (var locked = File.Open(sessionPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            saveBinding.RecordSaved(saveFile, receipt.SavedSha256, receipt.CreatedAt);
+            var rejected = false;
+            try { save.Save(); } catch (IOException) { rejected = true; }
+            check(rejected && File.ReadAllBytes(sessionPath).SequenceEqual(previousLedger), "Failed atomic save lost the old JSON.");
+        }
+        check(File.Exists(receipt.ReceiptPath), "Failed ledger save lost the independent save receipt.");
+        var loadedSave = ContainerSession.Load(save.SessionDirectory);
+        check(loadedSave.Bindings.Single().HasSavedChange && loadedSave.SaveRecoveryProblems.Count == 0,
+            "Restart did not recover the saved FNG.");
+        check(!File.Exists(receipt.ReceiptPath), "Recovered save receipt was not retired after ledger persistence.");
+
+        var (interrupted, interruptedFile) = Setup("interrupted-save");
+        var unchangedReceipt = ContainerSaveReceipt.Prepare(interrupted, interrupted.Bindings.Single(), interruptedFile);
+        var unchanged = ContainerSession.Load(interrupted.SessionDirectory);
+        check(!unchanged.SaveRecoveryProblems.Any() && !File.Exists(unchangedReceipt.ReceiptPath), "Untouched save intent was not safely discarded.");
+        var interruptedReceipt = ContainerSaveReceipt.Prepare(interrupted, interrupted.Bindings.Single(), interruptedFile);
+        File.WriteAllBytes(interruptedFile, edited);
+        var unresolved = ContainerWritePlanner.Build(ContainerSession.Load(interrupted.SessionDirectory));
+        check(unresolved.IsBlocked && unresolved.Blockers.Any(b => b.Contains("保存过程曾中断")), "Ambiguous interrupted save was silently ignored.");
+        var successfulReceipt = ContainerSaveReceipt.Prepare(interrupted, interrupted.Bindings.Single(), interruptedFile);
+        successfulReceipt.Complete();
+        ContainerSaveReceipt.ClearOlderForTarget(interrupted, successfulReceipt);
+        var resolved = ContainerSession.Load(interrupted.SessionDirectory);
+        check(!resolved.SaveRecoveryProblems.Any() && resolved.Bindings.Single().HasSavedChange,
+            "Explicit re-save failed to resolve its prior interrupted intent.");
+
+        var (superseded, supersededFile) = Setup("superseded-save-receipt");
+        var oldReceipt = ContainerSaveReceipt.Prepare(superseded, superseded.Bindings.Single(), supersededFile);
+        File.WriteAllBytes(supersededFile, edited);
+        oldReceipt.Complete();
+        var alternate = Path.Combine(superseded.SessionDirectory, "alternate.fng");
+        File.WriteAllBytes(alternate, original);
+        superseded.Bindings.Single().RecordSaved(alternate, ContainerFileHash.OfFile(alternate), oldReceipt.CreatedAt.AddSeconds(1));
+        superseded.Save();
+        var newer = ContainerSession.Load(superseded.SessionDirectory);
+        check(newer.Bindings.Single().CurrentFile == alternate && !File.Exists(oldReceipt.ReceiptPath),
+            "Stale receipt overrode a later explicit version choice.");
+
+        var journalPath = WriteBackJournal.JournalFilePath(save.SessionDirectory);
+        var journal = new List<WriteBackJournalEntry> { new() { Id = "keep", Status = WriteBackJournal.StatusCompleted } };
+        WriteBackJournal.Save(save.SessionDirectory, journal);
+        using (var locked = File.Open(journalPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            var rejected = false;
+            try { WriteBackJournal.Save(save.SessionDirectory, new List<WriteBackJournalEntry>()); }
+            catch (IOException) { rejected = true; }
+            check(rejected && WriteBackJournal.Load(save.SessionDirectory).Single().Id == "keep",
+                "Failed journal replacement destroyed recovery evidence.");
+        }
+        File.Move(sessionPath, sessionPath + ".tmp");
+        check(ContainerSession.ExistsIn(save.SessionDirectory) && ContainerSession.Load(save.SessionDirectory).Bindings.Count == 1 &&
+              File.Exists(sessionPath), "Legacy session temporary file was not recovered.");
+        File.Move(journalPath, journalPath + ".tmp");
+        check(WriteBackJournal.Load(save.SessionDirectory).Single().Id == "keep" && File.Exists(journalPath),
+            "Legacy journal temporary file was mistaken for an absent journal.");
+
+        var (multi, multiFile) = Setup("multi-target-copy");
+        // Existing tests cover consecutive operations; exercise multiple replacements in one publication too.
+        var extra = MakeFngWithObject("Other.fng", 5f);
+        File.WriteAllBytes(multi.OriginalPath, original.Concat(extra).ToArray());
+        var multiSource = FngContainer.Open(multi.OriginalPath);
+        var multiDir = Path.Combine(root, "multi-target-extracted");
+        var multiExtracted = multiSource.Extract(multiSource.Entries, multiDir);
+        multi = ContainerSession.Register(multi.OriginalPath, multiDir).Session;
+        multi.CreateWorkingCopy(Path.Combine(root, "multi-target.work.bun"));
+        foreach (var extracted in multiExtracted)
+            Record(multi, extracted.OutputPath, MakeFngWithObject(extracted.PackageName, 99f));
+        var multiReport = ContainerWriteBackExecutor.Execute(multi, ContainerWritePlanner.Build(multi));
+        check(multiReport.Success && multiReport.Items.Count == 2 && !multi.Bindings.Any(b => b.HasSavedChange),
+            "Multiple targets were not published and committed together.");
     }
 
 

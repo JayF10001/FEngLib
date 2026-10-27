@@ -18,6 +18,7 @@ public sealed class WriteBackItemResult
 
 public sealed class ContainerWriteBackReport
 {
+    public bool Published { get; internal set; }
     public bool Success { get; internal set; }
     public string WorkingCopyPath { get; internal set; }
     public string BackupPath { get; internal set; }
@@ -30,6 +31,14 @@ public sealed class ContainerWriteBackReport
     public string JournalId { get; internal set; }
     public DateTimeOffset StartedAt { get; internal set; }
     public DateTimeOffset FinishedAt { get; internal set; }
+}
+
+/// <summary>Includes publication evidence even when verification or bookkeeping fails afterwards.</summary>
+public sealed class ContainerWriteBackException : IOException
+{
+    public ContainerWriteBackReport Report { get; }
+    internal ContainerWriteBackException(Exception error, ContainerWriteBackReport report)
+        : base(error.Message, error) => Report = report;
 }
 
 /// <summary>
@@ -56,9 +65,16 @@ public static class ContainerWriteBackExecutor
         var gate = Locks.GetOrAdd(workingCopy.ToUpperInvariant(), _ => new SemaphoreSlim(1, 1));
         if (!gate.Wait(0))
             throw new IOException("另一个写回操作正在处理同一工作副本，请等待其完成。");
+        var report = new ContainerWriteBackReport { StartedAt = DateTimeOffset.UtcNow, WorkingCopyPath = workingCopy };
         try
         {
-            return ExecuteLocked(session, plan, workingCopy, progress);
+            return ExecuteLocked(session, plan, workingCopy, progress, report);
+        }
+        catch (Exception error)
+        {
+            report.FinishedAt = DateTimeOffset.UtcNow;
+            if (report.Published) report.LedgerComplete = false;
+            throw new ContainerWriteBackException(error, report);
         }
         finally
         {
@@ -67,13 +83,13 @@ public static class ContainerWriteBackExecutor
     }
 
     private static ContainerWriteBackReport ExecuteLocked(ContainerSession session, ContainerWritePlan plan,
-        string workingCopy, Action<string> progress)
+        string workingCopy, Action<string> progress, ContainerWriteBackReport report)
     {
-        var report = new ContainerWriteBackReport
-        {
-            StartedAt = DateTimeOffset.UtcNow,
-            WorkingCopyPath = workingCopy
-        };
+        if (!ContainerSession.PathsEqual(workingCopy, plan.WorkingCopyPath) ||
+            !ContainerSession.PathsEqual(session.OriginalPath, plan.OriginalPath) ||
+            ContainerSession.PathsEqual(workingCopy, session.OriginalPath) ||
+            plan.WorkingCopySha256 != session.WorkingCopySha256)
+            throw new InvalidDataException("会话与写回计划不一致，请重新生成清单。");
         var entries = WriteBackJournal.Load(session.SessionDirectory);
         var entry = new WriteBackJournalEntry
         {
@@ -92,6 +108,8 @@ public static class ContainerWriteBackExecutor
 
         // 1. Freeze: the plan is only as good as the bytes that were hashed when it was built.
         var shaBefore = ContainerFileHash.OfFile(workingCopy);
+        if (ContainerFileHash.OfFile(session.OriginalPath) != session.OriginalSha256)
+            throw new InvalidDataException("原始容器在生成计划后发生变化，写回已中止。");
         if (shaBefore != plan.WorkingCopySha256)
             throw new InvalidDataException("工作副本在生成计划后发生了变化，计划已过期，请重新生成。");
         foreach (var item in plan.Items)
@@ -100,6 +118,10 @@ public static class ContainerWriteBackExecutor
             if (hash != item.ReplacementSha256)
                 throw new InvalidDataException(
                     $"替换文件在生成计划后发生了变化: {item.ReplacementPath}，计划已过期，请重新生成。");
+            var parsed = ContainerWritePlanner.InspectChunkFile(item.ReplacementPath);
+            if (parsed.Storage != FngStorageKind.Uncompressed || parsed.StoredLength != item.StoredLength ||
+                !string.Equals(parsed.Name, item.PackageName, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("替换项的模型、身份或长度与计划不符。");
         }
 
         // 2. Backup the copy as it is now; never overwrite an existing backup.
@@ -153,7 +175,14 @@ public static class ContainerWriteBackExecutor
 
             // 5. Publish: atomic same-volume replace; readers never see a partial file.
             progress?.Invoke("发布新副本");
+            if (ContainerFileHash.OfFile(workingCopy) != shaBefore ||
+                ContainerFileHash.OfFile(session.OriginalPath) != session.OriginalSha256)
+                throw new InvalidDataException("发布前复核发现原件或工作副本已变化，未发布候选，请重新核实。");
+            foreach (var item in plan.Items)
+                if (ContainerFileHash.OfFile(item.ReplacementPath) != item.ReplacementSha256)
+                    throw new InvalidDataException("发布前替换文件已变化，未发布候选。");
             File.Replace(candidate, workingCopy, null);
+            report.Published = true;
         }
         catch (Exception error)
         {
@@ -197,24 +226,7 @@ public static class ContainerWriteBackExecutor
 
         try
         {
-            session.WorkingCopySha256 = shaAfter;
-            session.WorkingCopyLength = plan.WorkingCopyLength;
-            foreach (var item in plan.Items)
-            {
-                var binding = session.Bindings.Single(b => b.BlockOffset == item.BlockOffset);
-                binding.LastWriteBackSha256 = item.ReplacementSha256;
-            }
-            session.History.Add(new ContainerWriteBackRecord
-            {
-                At = DateTimeOffset.UtcNow,
-                WorkingCopySha256Before = shaBefore,
-                WorkingCopySha256After = shaAfter,
-                BackupPath = plan.BackupPath,
-                PackageNames = plan.Items.Select(i => i.PackageName).ToList(),
-                JournalId = entry.Id,
-                LedgerComplete = true
-            });
-            session.Save();
+            session.CompleteWriteBack(entry);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
@@ -264,6 +276,8 @@ public static class ContainerWriteBackExecutor
                 if (block.Sha256 != target.ReplacementSha256)
                     throw new InvalidDataException(
                         $"候选中的目标块 {target.PackageName} 与替换内容不一致。");
+                using var stream = File.Open(candidatePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                FngWriteBackValidator.Validate(stream, block.Offset, block.TotalLength, target.PackageName);
             }
             else if (block.Sha256 != expected.Sha256)
             {
