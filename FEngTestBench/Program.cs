@@ -14,9 +14,11 @@ internal static class Program
     {
         if (args.Length == 2 && args[0] == "--container-tests")
             return ContainerTests.Run(args[1]);
+        if (args.Length == 2 && args[0] == "--editing-tests")
+            return FngEditingTests.Run(args[1]);
         if (args.Length != 1)
         {
-            Console.Error.WriteLine("Usage: FEngTestBench <fng-directory> | --container-tests <output-directory>");
+            Console.Error.WriteLine("Usage: FEngTestBench <fng-directory> | --container-tests <output-directory> | --editing-tests <output-directory>");
             return 1;
         }
         var stopwatch = Stopwatch.StartNew();

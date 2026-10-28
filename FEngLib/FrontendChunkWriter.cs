@@ -39,6 +39,15 @@ public class FrontendChunkWriter
 
     public void Write(BinaryWriter writer)
     {
+        using var stream = new MemoryStream();
+        using var canonical = new BinaryWriter(stream);
+        WriteCanonical(canonical);
+        var bytes = stream.ToArray();
+        writer.Write(Package.EncodingSnapshot?.Restore(bytes) ?? bytes);
+    }
+
+    internal void WriteCanonical(BinaryWriter writer)
+    {
         writer.WriteChunk(PackageStart, writer =>
         {
             WritePkHd(writer);
@@ -155,7 +164,7 @@ public class FrontendChunkWriter
                     bw.WriteChunk(FrontendChunkType.ObjectData, bw =>
                     {
                         bw.WriteTag(FrontendTagType.ObjectType, bw => bw.WriteEnum(obj.Type));
-                        if (obj.Name != null)
+                        if (obj.Name != null && !obj.NameStoredAsHash)
                         {
                             bw.WriteTag(ObjectName, bw =>
                             {

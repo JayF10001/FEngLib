@@ -10,6 +10,7 @@ namespace FEngLib.Packages;
 /// </summary>
 public class Package : IHaveMessageResponses
 {
+    internal FngEncodingSnapshot EncodingSnapshot { get; set; }
     public Package()
     {
         ResourceRequests = new List<ResourceRequest>();

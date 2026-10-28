@@ -78,10 +78,11 @@ public abstract class ObjectViewWrapper<TObject> where TObject : class, IObject<
 	[Category("Data")]
 	[TypeConverter(typeof(Color4TypeConverter))]
 	[Editor(typeof(Color4Editor), typeof(UITypeEditor))]
+	[Description("修改颜色时同步调整已有颜色轨道的基准颜色，保留透明动画和相对关键帧。")]
 	public Color4 Color
 	{
 		get => WrappedObject.Data.Color;
-		set => WrappedObject.Data.Color = value;
+		set => ObjectPropertyEditing.SetColor(WrappedObject, value);
 	}
 
 	[Category("Data")]
@@ -94,10 +95,11 @@ public abstract class ObjectViewWrapper<TObject> where TObject : class, IObject<
 
 	[Category("Data")]
 	[TypeConverter(typeof(Vector3TypeConverter))]
+	[Description("修改位置时，同步平移此对象已有脚本的位置基准关键帧，保留相对动画和插值设置。")]
 	public Vector3 Position
 	{
 		get => WrappedObject.Data.Position;
-		set => WrappedObject.Data.Position = value;
+		set => ObjectPropertyEditing.SetPosition(WrappedObject, value);
 	}
 
 	[Category("Data")]

@@ -93,7 +93,9 @@ internal sealed class WriteBackPreviewDialog : Form
         lines.Add("");
         foreach (var item in plan.Items.Where(i => i.IsRunnable))
         {
-            lines.Add($"  ▸ {item.PackageName}　块 0x{item.BlockOffset:X}　{item.StoredLength} 字节（等长替换）");
+            lines.Add(plan.RebuildWithBinary
+                ? $"  ▸ {item.PackageName}　{item.StoredLength} → {item.ReplacementStoredLength} 字节（Binary 重建）"
+                : $"  ▸ {item.PackageName}　块 0x{item.BlockOffset:X}　{item.StoredLength} 字节（等长替换）");
             lines.Add($"      替换文件 : {item.ReplacementPath}");
             lines.Add($"      替换摘要 : {item.ReplacementSha256}");
             lines.Add($"      块内现有 : {item.CurrentBlockSha256}");
@@ -102,7 +104,9 @@ internal sealed class WriteBackPreviewDialog : Form
 
         if (plan.Items.Any(i => i.IsRunnable))
         {
-            lines.Add("非目标块（含填充与压缩块）逐字节保留，所有块偏移不变。");
+            lines.Add(plan.RebuildWithBinary
+                ? "重建会调整块偏移、填充和 TPK 编码；逐一核对 FNG，检查贴图像素、属性及其他资源。"
+                : "非目标块（含填充与压缩块）逐字节保留，所有块偏移不变。");
             lines.Add("原始容器与游戏目录不会被修改；未通过候选验证不会发布。");
         }
         foreach (var note in plan.Notes) lines.Add("  · " + note);

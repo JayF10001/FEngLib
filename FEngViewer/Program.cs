@@ -10,8 +10,11 @@ static class Program
     ///  The main entry point for the application.
     /// </summary>
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
+        if (FEngLib.Assets.BinaryRuntime.TryRunWorker(args, out var exitCode))
+        { Environment.ExitCode = exitCode; return; }
+        FEngLib.Assets.BinaryRuntime.WorkerHostPath = typeof(Program).Assembly.Location;
         ApplicationConfiguration.Initialize();
         using var iconStream = typeof(Program).Assembly.GetManifestResourceStream("FEngViewer.Assets.FEngEditor.ico");
         using var icon = new Icon(iconStream);

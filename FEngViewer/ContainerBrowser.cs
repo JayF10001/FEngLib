@@ -42,6 +42,7 @@ internal sealed class ContainerBrowser : Form
     private readonly Button _extractSelected = new() { Text = "Extract Selected & Open", AutoSize = true, Enabled = false };
     private readonly Button _extractAll = new() { Text = "Extract All & Open Tabs", AutoSize = true, Enabled = false };
     private readonly Button _cancel = new() { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
+    private readonly Button _binaryRuntime = new() { Text = "配置 Binary…", AutoSize = true };
 
     public string ExtractionSummary { get; private set; }
 
@@ -106,6 +107,13 @@ internal sealed class ContainerBrowser : Form
         _extractAll.Click += async (_, _) => await Extract(allEntries: true);
         _browseContainer.Click += async (_, _) => await BrowseContainer();
         _browseOutput.Click += (_, _) => BrowseOutput();
+        _binaryRuntime.Click += async (_, _) =>
+        {
+            using var dialog = new FolderBrowserDialog { Description = "选择 Binary 2.9 安装目录（包含 Nikki.dll）" };
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            try { BinaryRuntime.Configure(dialog.SelectedPath); await Scan(); }
+            catch (Exception error) { MessageBox.Show(this, error.Message, "Binary 运行库"); }
+        };
         _output.TextChanged += (_, _) =>
         {
             if (!_settingOutput) _outputEdited = true;
@@ -154,6 +162,7 @@ internal sealed class ContainerBrowser : Form
         buttons.Controls.Add(_cancel);
         buttons.Controls.Add(_extractAll);
         buttons.Controls.Add(_extractSelected);
+        buttons.Controls.Add(_binaryRuntime);
         return buttons;
     }
 
@@ -368,6 +377,7 @@ internal sealed class ContainerBrowser : Form
         _browseContainer.Enabled = !busy;
         _browseOutput.Enabled = !busy;
         _cancel.Enabled = !busy;
+        _binaryRuntime.Enabled = !busy;
         UpdateButtons();
     }
 }

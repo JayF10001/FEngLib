@@ -73,6 +73,7 @@ public sealed class ContainerSession
     public string OriginalSha256 { get; set; }
     public string WorkingCopyPath { get; set; }
     public long WorkingCopyLength { get; set; }
+    public bool RebuiltWithBinary { get; set; }
     public string WorkingCopySha256 { get; set; }
     public List<ContainerFngBinding> Bindings { get; set; } = new();
     public List<ContainerWriteBackRecord> History { get; set; } = new();
@@ -249,6 +250,8 @@ public sealed class ContainerSession
     internal void CompleteWriteBack(WriteBackJournalEntry entry)
     {
         var previousHash = WorkingCopySha256;
+        var previousLength = WorkingCopyLength;
+        var previousRebuilt = RebuiltWithBinary;
         var previous = Bindings.Select(b => b.LastWriteBackSha256).ToArray();
         var historyCount = History.Count;
         try
@@ -260,6 +263,8 @@ public sealed class ContainerSession
                 binding.LastWriteBackSha256 = item.ReplacementSha256;
             }
             WorkingCopySha256 = entry.WorkingCopySha256Result;
+            WorkingCopyLength = new FileInfo(WorkingCopyPath).Length;
+            RebuiltWithBinary |= entry.RebuiltWithBinary;
             if (!History.Any(h => h.JournalId == entry.Id))
                 History.Add(new ContainerWriteBackRecord
                 {
@@ -275,6 +280,8 @@ public sealed class ContainerSession
         catch
         {
             WorkingCopySha256 = previousHash;
+            WorkingCopyLength = previousLength;
+            RebuiltWithBinary = previousRebuilt;
             for (var i = 0; i < Bindings.Count; i++) Bindings[i].LastWriteBackSha256 = previous[i];
             if (History.Count > historyCount) History.RemoveRange(historyCount, History.Count - historyCount);
             throw;

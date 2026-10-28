@@ -5,7 +5,7 @@ using System.Linq;
 
 namespace FEngLib.Assets;
 
-/// <summary>One planned equal-length replacement of a single FNG block.</summary>
+/// <summary>One planned replacement, identified by original offset and a unique package name for rebuilds.</summary>
 public sealed class WriteBackPlanItem
 {
     public string PackageName { get; set; }
@@ -50,6 +50,10 @@ public sealed class ContainerWritePlan
     public List<WriteBackPlanBlock> ExpectedBlocks { get; set; } = new();
     public List<string> Blockers { get; } = new();
     public List<string> Notes { get; } = new();
+    public bool RebuildWithBinary { get; set; }
+    public Dictionary<string, string> ExpectedFngs { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<string> ExpectedOtherResources { get; set; } = new();
+    public bool PreserveJdlz { get; set; }
 
     public bool IsExecutable => Blockers.Count == 0 && Items.Count > 0 && Items.All(i => i.IsRunnable);
     public bool HasPendingChanges => PendingChangeCount > 0;
@@ -112,6 +116,34 @@ public static class ContainerWritePlanner
         ContainerBlockIndex index;
         try
         {
+            var container = FngContainer.Open(session.WorkingCopyPath);
+            if (container.RequiresRebuild || session.RebuiltWithBinary || session.Bindings.Any(b =>
+                    b.HasSavedChange && File.Exists(b.EffectiveFile) && new FileInfo(b.EffectiveFile).Length != b.StoredLength))
+            {
+                plan.RebuildWithBinary = true;
+                plan.WorkingCopyLength = container.SourceLength;
+                plan.WorkingCopySha256 = container.SourceSha256;
+                plan.BlockCount = container.BlockCount;
+                if (container.SourceSha256 != session.WorkingCopySha256)
+                    plan.Blockers.Add("工作副本与登记摘要不一致，不能在未知内容上重建。");
+                if (container.Entries.Any(e => !e.CanExtract) || container.Entries.GroupBy(e => e.Name,
+                        StringComparer.OrdinalIgnoreCase).Any(g => g.Count() != 1))
+                    plan.Blockers.Add("Binary 重建要求所有 FNG 都可解析且包名唯一；当前容器不符合条件。");
+                if (BinaryRuntime.DirectoryPath == null)
+                    plan.Blockers.Add("请先在容器窗口配置 Binary 2.9 运行库目录。");
+                if (container.SourceLength > (1 << 26)) plan.Blockers.Add("Binary 重建暂支持不超过 64 MiB 的容器。");
+                plan.BackupPath = PlanBackupPath(session, session.WorkingCopyPath);
+                foreach (var binding in session.Bindings.Where(b => b.HasSavedChange))
+                    plan.Items.Add(BuildItem(session, binding, null, container));
+                foreach (var group in plan.Items.GroupBy(i => i.PackageName, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+                    foreach (var item in group) item.Blockers.Add("同一包名存在多个替换项，拒绝重建。");
+                if (plan.Blockers.Count != 0) return plan;
+                plan.ExpectedFngs = container.Entries.ToDictionary(e => e.Name, e => e.Sha256, StringComparer.OrdinalIgnoreCase);
+                plan.ExpectedOtherResources = BinaryRebuildValidation.OtherResources(session.WorkingCopyPath, out var jdlz);
+                plan.PreserveJdlz = jdlz;
+                plan.Notes.Add("使用 Binary/Nikki 重建容器；保留整文件 JDLZ，逐一核对所有 FNG 和其他资源，校验贴图像素及属性。");
+                return plan;
+            }
             index = ContainerBlockIndex.Scan(session.WorkingCopyPath);
         }
         catch (Exception error) when (error is IOException or InvalidDataException or
@@ -162,7 +194,7 @@ public static class ContainerWritePlanner
     }
 
     private static WriteBackPlanItem BuildItem(ContainerSession session, ContainerFngBinding binding,
-        ContainerBlockIndex index)
+        ContainerBlockIndex index, FngContainer rebuilt = null)
     {
         var item = new WriteBackPlanItem
         {
@@ -223,6 +255,15 @@ public static class ContainerWritePlanner
 
         item.ReplacementStoredLength = parsed.StoredLength;
         item.ReplacementSha256 = replacementHash;
+        if (rebuilt != null)
+        {
+            var matches = rebuilt.Entries.Where(e => string.Equals(e.Name, binding.PackageName, StringComparison.OrdinalIgnoreCase)).ToArray();
+            var current = matches.FirstOrDefault();
+            if (matches.Length != 1 || current.Sha256 != binding.WriteBackTargetSha256)
+                item.Blockers.Add("当前副本中的 FNG 与初始提取或上次写回不一致，拒绝按包名替换。");
+            else item.CurrentBlockSha256 = current.Sha256;
+            return item;
+        }
         if (parsed.StoredLength != binding.StoredLength)
         {
             item.Blockers.Add(

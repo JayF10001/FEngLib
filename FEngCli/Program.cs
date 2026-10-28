@@ -6,6 +6,8 @@ internal static class Program
 {
 	private static int Main(string[] args)
 	{
+        if (FEngLib.Assets.BinaryRuntime.TryRunWorker(args, out var exitCode)) return exitCode;
+        FEngLib.Assets.BinaryRuntime.WorkerHostPath = typeof(Program).Assembly.Location;
 		//NFSCO Specific changes
 		// FRONTEND\\FECUSTOMIZEPARTS
 		// GLOBAL\\WORLDMAPMAIN

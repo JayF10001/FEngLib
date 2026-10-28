@@ -77,6 +77,8 @@ public interface IObject<out TData> : IScriptedObject, ICloneable, IHaveMessageR
 	ObjectFlags Flags { get; set; }
 	ResourceRequest ResourceRequest { get; set; }
 	string Name { get; set; }
+	/// <summary>The source used an Oh tag; resolving its display name must not add an On string.</summary>
+	bool NameStoredAsHash { get; set; }
 	uint NameHash { get; set; }
 	uint Guid { get; set; }
 	IObject<ObjectData> Parent { get; set; }
@@ -177,6 +179,7 @@ public abstract class BaseObject<TData, TScript> : IObject<TData>, IScriptedObje
 		}
 
 		this.Name = @object.Name;
+		this.NameStoredAsHash = @object.NameStoredAsHash;
 		this.NameHash = @object.NameHash;
 		this.Guid = @object.Guid;
 		this.Parent = @object.Parent?.Clone() as IObject<ObjectData>;
@@ -194,6 +197,7 @@ public abstract class BaseObject<TData, TScript> : IObject<TData>, IScriptedObje
 	public ObjectFlags Flags { get; set; }
 	public ResourceRequest ResourceRequest { get; set; }
 	public string Name { get; set; }
+	public bool NameStoredAsHash { get; set; }
 	public uint NameHash { get; set; }
 	public uint Guid { get; set; }
 	public IObject<ObjectData> Parent { get; set; }

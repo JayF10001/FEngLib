@@ -22,6 +22,7 @@ public class FrontendPackageLoader
 	/// <returns>A new <see cref="Package" /> instance.</returns>
 	public Package Load(BinaryReader br)
     {
+        var start = br.BaseStream.Position;
         var package = new Package();
         var chunkReader = new FrontendChunkReader(package, br, HashResolver);
 
@@ -36,6 +37,17 @@ public class FrontendPackageLoader
                     break;
             }
 
+        var end = br.BaseStream.Position;
+        if (br.BaseStream.CanSeek)
+        {
+            br.BaseStream.Position = start;
+            var body = br.ReadBytes(checked((int)(end - start)));
+            br.BaseStream.Position = end;
+            using var stream = new MemoryStream();
+            using var writer = new BinaryWriter(stream);
+            new FrontendChunkWriter(package).WriteCanonical(writer);
+            package.EncodingSnapshot = new FngEncodingSnapshot(body, stream.ToArray());
+        }
         return package;
     }
 

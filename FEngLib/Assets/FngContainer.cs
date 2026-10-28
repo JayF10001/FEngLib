@@ -9,8 +9,8 @@ using System.Text.Json;
 namespace FEngLib.Assets;
 
 /// <summary>
-/// Read-only MW05 chunk-stream index. Unknown blocks are skipped by their declared length,
-/// never by searching their payload for signatures. Compressed blocks remain visible.
+/// Read-only MW05 chunk-stream index. Binary's optional codec decodes whole-file JDLZ and
+/// compressed FNGs. Offsets identify original logical blocks; extracted hashes describe decoded FNGs.
 /// </summary>
 public sealed class FngContainer
 {
@@ -34,13 +34,27 @@ public sealed class FngContainer
     public string SourceSha256 { get; }
     public int BlockCount { get; }
     public IReadOnlyList<FngContainerEntry> Entries { get; }
+    public bool RequiresRebuild { get; private set; }
+    private byte[] decodedSource;
 
     public static FngContainer Open(string path)
     {
         path = Path.GetFullPath(path);
-        using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var source = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var sourceHash = Hash(source);
+        source.Position = 0;
+        using var markerReader = new BinaryReader(source, Encoding.UTF8, true);
+        var marker = source.Length >= 4 ? markerReader.ReadUInt32() : 0;
+        source.Position = 0;
+        byte[] decoded = null;
+        if (IsWholeFileWrapper(marker))
+        {
+            if (marker != 0x5A4C444A) throw new NotSupportedException("整文件压缩目前支持 JDLZ。");
+            using var buffer = new MemoryStream(); source.CopyTo(buffer);
+            decoded = BinaryRuntime.Decompress(buffer.ToArray());
+        }
+        using Stream stream = decoded == null ? File.OpenRead(path) : new MemoryStream(decoded);
         using var reader = new BinaryReader(stream, Encoding.UTF8, true);
-        var sourceHash = Hash(stream);
         stream.Position = 0;
         var entries = new List<FngContainerEntry>();
         var blockCount = 0;
@@ -58,11 +72,39 @@ public sealed class FngContainer
                 throw new InvalidDataException($"Chunk 0x{id:X8} at 0x{offset:X} exceeds file bounds.");
             blockCount++;
             if (id == FngChunkId || id == CompressedFngChunkId)
-                entries.Add(ReadEntry(reader, offset, id, length));
+            {
+                var entry = ReadEntry(reader, offset, id, length);
+                if (entry.Storage == FngStorageKind.Compressed && BinaryRuntime.DirectoryPath != null)
+                {
+                    try
+                    {
+                        var codecOffset = offset + (id == CompressedFngChunkId ? 12 : 20);
+                        stream.Position = codecOffset;
+                        var body = BinaryRuntime.Decompress(reader.ReadBytes(checked((int)(end - codecOffset))));
+                        using var bytes = new MemoryStream();
+                        using var writer = new BinaryWriter(bytes, Encoding.UTF8, true);
+                        writer.Write(FngChunkId); writer.Write(body.Length); writer.Write(body);
+                        bytes.Position = 8;
+                        using var decodedReader = new BinaryReader(bytes, Encoding.UTF8, true);
+                        var canonical = ReadEntry(decodedReader, 0, FngChunkId, (uint)body.Length);
+                        if (!canonical.CanExtract) throw new InvalidDataException("解压后的 FNG 无效：" + canonical.Diagnostic);
+                        entry = new FngContainerEntry(offset, FngChunkId, bytes.Length, canonical.Name,
+                            FngStorageKind.Uncompressed, "已由 Binary 解压；写回时重建容器", canonical.Sha256)
+                            { DecodedBytes = bytes.ToArray() };
+                    }
+                    catch (Exception error) when (error is IOException or InvalidDataException or NotSupportedException or ArgumentException)
+                    {
+                        entry = new FngContainerEntry(offset, id, length + 8L, null, FngStorageKind.Compressed,
+                            entry.Diagnostic + " 解压失败：" + error.Message, null);
+                    }
+                }
+                entries.Add(entry);
+            }
             stream.Position = end;
         }
 
-        return new FngContainer(path, stream.Length, sourceHash, blockCount, entries);
+        return new FngContainer(path, source.Length, sourceHash, blockCount, entries)
+        { decodedSource = decoded, RequiresRebuild = decoded != null || entries.Any(e => e.DecodedBytes != null) };
     }
 
     internal static bool IsWholeFileWrapper(uint id)
@@ -133,8 +175,8 @@ public sealed class FngContainer
     }
 
     /// <summary>
-    /// Extracts exact original blocks and SHA256 provenance, refusing existing destinations.
-    /// Source stays read-only; no decompression or model reserialization occurs.
+    /// Extracts original FNG bytes (decoded for compressed inputs) and SHA256 provenance.
+    /// The physical container fingerprint stays attached to every decoded extraction.
     /// </summary>
     public IReadOnlyList<FngExtraction> Extract(IEnumerable<FngContainerEntry> selection, string directory)
         => Extract(selection, directory, ExistingFilePolicy.Fail).Extracted;
@@ -191,8 +233,14 @@ public sealed class FngContainer
                 var staged = Path.Combine(staging, i + ".fng");
                 using (var output = new FileStream(staged, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 {
-                    source.Position = entry.Offset;
-                    CopyRange(source, output, entry.StoredLength);
+                    if (entry.DecodedBytes != null) output.Write(entry.DecodedBytes);
+                    else if (decodedSource != null)
+                        output.Write(decodedSource, checked((int)entry.Offset), checked((int)entry.StoredLength));
+                    else
+                    {
+                        source.Position = entry.Offset;
+                        CopyRange(source, output, entry.StoredLength);
+                    }
                 }
                 using (var output = File.OpenRead(staged))
                     if (Hash(output) != entry.Sha256)

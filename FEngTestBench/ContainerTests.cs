@@ -350,7 +350,12 @@ internal static class ContainerTests
 
         File.WriteAllBytes(alphaPath, MakeFng("Alpha.fng"));
         alphaBinding.RecordSaved(alphaPath, ContainerFileHash.OfFile(alphaPath));
-        RejectPlan(ContainerWritePlanner.Build(session), "长度不同", "Different length must block.");
+        var variablePlan = ContainerWritePlanner.Build(session);
+        check(variablePlan.RebuildWithBinary, "Different length must route through Binary rebuilding.");
+        if (BinaryRuntime.DirectoryPath == null)
+            RejectPlan(variablePlan, "配置 Binary", "A rebuild needs an explicitly configured Binary runtime.");
+        else
+            check(variablePlan.IsExecutable, "A valid variable-size FNG must be accepted by the rebuild planner.");
         File.WriteAllBytes(alphaPath, MakeFngWithObject("Alpha.fng", 84f));
 
         File.WriteAllBytes(alphaPath, MakeFngWithObject("Other.fng", 84f));

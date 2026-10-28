@@ -20,6 +20,7 @@ public sealed class WriteBackJournalItem
 /// </summary>
 public sealed class WriteBackJournalEntry
 {
+    public bool RebuiltWithBinary { get; set; }
     public string Id { get; set; }
     public DateTimeOffset StartedAt { get; set; }
     public string WorkingCopyPath { get; set; }

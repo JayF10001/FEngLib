@@ -59,6 +59,7 @@ public class ObjectDataChunk : FrontendObjectChunk
             case StringBufferLengthTag _:
                 break;
             case ObjectHashTag objectHashTag:
+				frontendObject.NameStoredAsHash = true;
 				frontendObject.Name = HashResolver.ResolveNameHash(null, objectHashTag.Hash, _logReference);
 				frontendObject.NameHash = objectHashTag.Hash;
                 break;
@@ -72,6 +73,7 @@ public class ObjectDataChunk : FrontendObjectChunk
                 ProcessObjectParentTag(package, frontendObject, objectParentTag);
                 break;
             case ObjectNameTag objectNameTag:
+				frontendObject.NameStoredAsHash = false;
 				frontendObject.Name = HashResolver.ResolveNameHash(objectNameTag.Name, objectNameTag.NameHash, _logReference);
                 frontendObject.NameHash = objectNameTag.NameHash;
                 break;

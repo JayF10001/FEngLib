@@ -7,7 +7,8 @@ public enum FngStorageKind
     Invalid
 }
 
-/// <summary>A top-level FNG block. Offset includes its eight-byte container header.</summary>
+/// <summary>A top-level FNG block. Offset is its position in the decoded container stream;
+/// length and SHA256 describe the extracted FNG, which may have been decompressed.</summary>
 public sealed class FngContainerEntry
 {
     internal FngContainerEntry(long offset, uint chunkId, long storedLength, string name,
@@ -29,5 +30,6 @@ public sealed class FngContainerEntry
     public FngStorageKind Storage { get; }
     public string Diagnostic { get; }
     public string Sha256 { get; }
+    internal byte[] DecodedBytes { get; set; }
     public bool CanExtract => Storage == FngStorageKind.Uncompressed;
 }

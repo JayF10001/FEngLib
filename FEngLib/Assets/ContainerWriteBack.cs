@@ -42,7 +42,7 @@ public sealed class ContainerWriteBackException : IOException
 }
 
 /// <summary>
-/// Executes a validated equal-length write-back plan as one transaction per container copy:
+/// Executes an equal-length patch or a Binary rebuild as one transaction per container copy:
 /// freeze inputs again, back up, build and fully verify a staged candidate, publish with an
 /// atomic same-volume replace, re-read the result, then update the session ledger. The original
 /// container is never written. A candidate that fails verification is never published.
@@ -93,6 +93,7 @@ public static class ContainerWriteBackExecutor
         var entries = WriteBackJournal.Load(session.SessionDirectory);
         var entry = new WriteBackJournalEntry
         {
+            RebuiltWithBinary = plan.RebuildWithBinary,
             Id = Guid.NewGuid().ToString("N")[..12],
             StartedAt = report.StartedAt,
             WorkingCopyPath = workingCopy,
@@ -119,7 +120,7 @@ public static class ContainerWriteBackExecutor
                 throw new InvalidDataException(
                     $"替换文件在生成计划后发生了变化: {item.ReplacementPath}，计划已过期，请重新生成。");
             var parsed = ContainerWritePlanner.InspectChunkFile(item.ReplacementPath);
-            if (parsed.Storage != FngStorageKind.Uncompressed || parsed.StoredLength != item.StoredLength ||
+            if (parsed.Storage != FngStorageKind.Uncompressed || parsed.StoredLength != item.ReplacementStoredLength ||
                 !string.Equals(parsed.Name, item.PackageName, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("替换项的模型、身份或长度与计划不符。");
         }
@@ -150,20 +151,24 @@ public static class ContainerWriteBackExecutor
             ".fng-writeback-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
-            // 3. Build the candidate from a full copy, then apply exactly the planned ranges.
+            // 3. Build a separate candidate; the live copy remains unchanged until verification.
             progress?.Invoke("构建候选副本");
-            File.Copy(workingCopy, candidate, overwrite: false);
-            foreach (var item in plan.Items)
+            if (plan.RebuildWithBinary) BinaryRuntime.Rebuild(workingCopy, candidate, plan);
+            else
             {
-                var replacement = File.ReadAllBytes(item.ReplacementPath);
-                using var hashCheck = System.Security.Cryptography.IncrementalHash.CreateHash(
-                    System.Security.Cryptography.HashAlgorithmName.SHA256);
-                hashCheck.AppendData(replacement);
-                if (Convert.ToHexString(hashCheck.GetHashAndReset()) != item.ReplacementSha256)
-                    throw new InvalidDataException($"替换文件校验失败: {item.ReplacementPath}");
-                using var target = File.Open(candidate, FileMode.Open, FileAccess.Write, FileShare.None);
-                target.Position = item.BlockOffset;
-                target.Write(replacement, 0, replacement.Length);
+                File.Copy(workingCopy, candidate, overwrite: false);
+                foreach (var item in plan.Items)
+                {
+                    var replacement = File.ReadAllBytes(item.ReplacementPath);
+                    using var hashCheck = System.Security.Cryptography.IncrementalHash.CreateHash(
+                        System.Security.Cryptography.HashAlgorithmName.SHA256);
+                    hashCheck.AppendData(replacement);
+                    if (Convert.ToHexString(hashCheck.GetHashAndReset()) != item.ReplacementSha256)
+                        throw new InvalidDataException($"替换文件校验失败: {item.ReplacementPath}");
+                    using var target = File.Open(candidate, FileMode.Open, FileAccess.Write, FileShare.None);
+                    target.Position = item.BlockOffset;
+                    target.Write(replacement, 0, replacement.Length);
+                }
             }
 
             // 4. Independent verification: walk every block of the candidate.
@@ -214,7 +219,8 @@ public static class ContainerWriteBackExecutor
 
         report.Success = true;
         report.Sha256After = shaAfter;
-        report.VerifiedBlockCount = plan.ExpectedBlocks.Count;
+        report.VerifiedBlockCount = plan.RebuildWithBinary
+            ? FngContainer.Open(workingCopy).BlockCount : plan.ExpectedBlocks.Count;
         report.Items = plan.Items.Select(i => new WriteBackItemResult
         {
             PackageName = i.PackageName,
@@ -257,6 +263,7 @@ public static class ContainerWriteBackExecutor
     /// </summary>
     private static void VerifyCandidate(string candidatePath, ContainerWritePlan plan)
     {
+        if (plan.RebuildWithBinary) { BinaryRebuildValidation.Verify(candidatePath, plan); return; }
         var index = ContainerBlockIndex.Scan(candidatePath);
         if (index.Blocks.Count != plan.ExpectedBlocks.Count)
             throw new InvalidDataException(
