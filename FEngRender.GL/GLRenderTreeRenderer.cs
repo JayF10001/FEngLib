@@ -68,11 +68,11 @@ public class GLRenderTreeRenderer
     /// <param name="tree">The <see cref="RenderTree"/> to render.</param>
     public void Render(RenderTree tree)
     {
+        // FNG layers use painter order (GetZ below), not the depth buffer. SharpGL enables
+        // depth testing by default; its resized DIB surface can otherwise occlude every layer.
+        _gl.Disable(OpenGL.GL_DEPTH_TEST);
         _gl.Clear(OpenGL.GL_COLOR_BUFFER_BIT | OpenGL.GL_DEPTH_BUFFER_BIT);
         _gl.LoadIdentity();
-
-        // disable depth
-        _gl.DepthMask(0);
 
         var dt = (int)(_stopwatch.ElapsedMilliseconds - _lastRenderTime);
         _gl.DrawText(10, 10, 1, 0, 0, "Consolas", 16, $"dt: {dt}ms");

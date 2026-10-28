@@ -25,7 +25,7 @@ internal sealed class ExtractionProgressDialog : Form
     private readonly string _outputDirectory;
     private readonly ExistingFilePolicy _policy;
     private readonly string _groupName;
-    private readonly Func<string, IReadOnlyList<string>, string> _importFiles;
+    private readonly Func<string, string, string, IReadOnlyList<string>, string> _importFiles;
     private readonly bool _listAllEntries;
 
     private readonly ListView _list = new()
@@ -50,7 +50,7 @@ internal sealed class ExtractionProgressDialog : Form
 
     public ExtractionProgressDialog(FngContainer container, FngContainerEntry[] selection, string outputDirectory,
         ExistingFilePolicy policy, string groupName, bool listAllEntries,
-        Func<string, IReadOnlyList<string>, string> importFiles)
+        Func<string, string, string, IReadOnlyList<string>, string> importFiles)
     {
         _container = container ?? throw new ArgumentNullException(nameof(container));
         _selection = selection ?? throw new ArgumentNullException(nameof(selection));
@@ -162,7 +162,7 @@ internal sealed class ExtractionProgressDialog : Form
             }
             else
             {
-                var summary = _importFiles(_groupName, paths);
+                var summary = _importFiles(_container.SourcePath, _outputDirectory, _groupName, paths);
                 _opened.Text = summary;
                 _opened.ForeColor = ExtractedColor;
             }

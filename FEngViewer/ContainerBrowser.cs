@@ -15,7 +15,7 @@ namespace FEngViewer;
 /// </summary>
 internal sealed class ContainerBrowser : Form
 {
-    private readonly Func<string, IReadOnlyList<string>, string> _importFiles;
+    private readonly Func<string, string, string, IReadOnlyList<string>, string> _importFiles;
     private string _sourcePath;
     private FngContainer _container;
     private bool _busy;
@@ -51,7 +51,7 @@ internal sealed class ContainerBrowser : Form
     /// <summary>Extraction output of the last successful run; null until then.</summary>
     public string ExtractionOutputDirectory { get; private set; }
 
-    public ContainerBrowser(string sourcePath, Func<string, IReadOnlyList<string>, string> importFiles)
+    public ContainerBrowser(string sourcePath, Func<string, string, string, IReadOnlyList<string>, string> importFiles)
     {
         _sourcePath = sourcePath;
         _importFiles = importFiles ?? throw new ArgumentNullException(nameof(importFiles));
@@ -345,6 +345,9 @@ internal sealed class ContainerBrowser : Form
             ExtractionSummary = progress.SummaryText;
             if (progress.Succeeded)
             {
+                // Extraction is complete. Otherwise our FormClosing guard vetoes the OK
+                // close and the caller sees Cancel even though files were imported.
+                SetBusy(false);
                 DialogResult = DialogResult.OK;
                 Close();
             }

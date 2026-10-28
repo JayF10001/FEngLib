@@ -64,6 +64,7 @@ public partial class PackageView
     private ContainerWriteBackCoordinator _writeBack;
     private DocumentTabBar _tabBar;
     private TreeView _workspaceTree;
+    private TreeNode _workspaceTopNode;
     private Panel _leftStack;
     private Button _filesModeButton;
     private Button _treeModeButton;
@@ -253,8 +254,8 @@ public partial class PackageView
             ShowLines = false,
             ShowRootLines = true,
             ShowNodeToolTips = true,
-            // Long names are truncated with an ellipsis instead of producing a scrollbar.
-            Scrollable = false,
+            // Keep vertical scrolling enabled; long names are shortened separately below.
+            Scrollable = true,
             BorderStyle = BorderStyle.FixedSingle
         };
         BuildWorkspaceIcons();
@@ -269,10 +270,8 @@ public partial class PackageView
         _splitOuter.Panel1.Controls.Add(_leftStack);
         _splitOuter.Panel1.Controls.Add(_leftToolbar);
 
-        _workspaceTree.NodeMouseDoubleClick += (_, e) =>
-        {
-            if (e.Node?.Tag is WorkspaceFile file) OpenWorkspaceFile(file);
-        };
+        _workspaceTree.NodeMouseClick += WorkspaceTree_NodeMouseClick;
+        _workspaceTree.NodeMouseDoubleClick += WorkspaceTree_NodeMouseDoubleClick;
         _workspaceTree.KeyDown += WorkspaceTree_KeyDown;
         _workspaceTree.MouseDown += WorkspaceTree_MouseDown;
         _workspaceTree.AfterSelect += (_, _) => UpdateWorkspaceMenuState();
@@ -632,6 +631,8 @@ public partial class PackageView
     private void SetLeftMode(WorkspaceLeftMode mode)
     {
         var previous = _leftMode;
+        if (previous == WorkspaceLeftMode.Files && mode != previous && _workspaceTree != null)
+            _workspaceTopNode = _workspaceTree.TopNode;
         if (_leftToolbar != null && !_syncingSearch && previous != mode)
         {
             if (previous == WorkspaceLeftMode.Files) _fileFilterText = TxtSearch.Text;
@@ -658,7 +659,10 @@ public partial class PackageView
 
         if (files)
         {
-            RebuildWorkspaceTree();
+            // Switching views must not rebuild, expand groups or scroll to the active file.
+            ApplyWorkspaceNodeTextWidths();
+            if (previous != mode && _workspaceTopNode?.TreeView == _workspaceTree)
+                _workspaceTree.TopNode = _workspaceTopNode;
         }
         else
         {
@@ -709,7 +713,11 @@ public partial class PackageView
     private void RebuildWorkspaceTree()
     {
         if (_workspaceTree == null) return;
-        var filter = (_leftMode == WorkspaceLeftMode.Files ? TxtSearch.Text : "")?.Trim() ?? "";
+        var filter = (_leftMode == WorkspaceLeftMode.Files ? TxtSearch.Text : _fileFilterText)?.Trim() ?? "";
+        var expandedGroups = _workspaceTree.Nodes.Cast<TreeNode>()
+            .ToDictionary(node => node.Name, node => node.IsExpanded, StringComparer.OrdinalIgnoreCase);
+        var selectedKey = _workspaceTree.SelectedNode?.Name;
+        var topKey = (_leftMode == WorkspaceLeftMode.Files ? _workspaceTree.TopNode : _workspaceTopNode)?.Name;
         var sortByName = _fileSortCombo != null && _fileSortCombo.SelectedIndex == 1;
         var duplicateNames = new HashSet<string>(
             _workspace.Files.GroupBy(file => file.Caption, StringComparer.OrdinalIgnoreCase)
@@ -734,6 +742,7 @@ public partial class PackageView
                                   (pendingInGroup > 0 ? $"　· 待写回 {pendingInGroup}" : "");
                 var root = new TreeNode(rootCaption)
                 {
+                    Name = "group:" + group.Name,
                     ImageKey = "group",
                     SelectedImageKey = "group",
                     ToolTipText = $"{group.Name}：{group.Files.Count} 个 FNG" +
@@ -761,7 +770,8 @@ public partial class PackageView
                     RememberNodeCaption(root.Nodes[^1], more);
                 }
 
-                root.Expand();
+                if (!expandedGroups.TryGetValue(root.Name, out var expanded) || expanded)
+                    root.Expand();
             }
         }
         finally
@@ -770,7 +780,14 @@ public partial class PackageView
         }
 
         ApplyWorkspaceNodeTextWidths();
-        RevealActiveWorkspaceNode();
+        if (selectedKey != null)
+            _workspaceTree.SelectedNode = _workspaceTree.Nodes.Find(selectedKey, true).FirstOrDefault();
+        // Selecting a hidden child can expand its parent in the native tree. Preserve the
+        // user's collapsed groups even when a workspace refresh restores that selection.
+        foreach (TreeNode root in _workspaceTree.Nodes)
+            if (expandedGroups.TryGetValue(root.Name, out var expanded) && !expanded) root.Collapse();
+        _workspaceTopNode = topKey == null ? null : _workspaceTree.Nodes.Find(topKey, true).FirstOrDefault();
+        if (_workspaceTopNode != null) _workspaceTree.TopNode = _workspaceTopNode;
     }
 
     private static string ParentFolderName(string path)
@@ -859,12 +876,16 @@ public partial class PackageView
         node.ToolTipText = tooltip;
     }
 
-    private void RevealActiveWorkspaceNode()
+    private void WorkspaceTree_NodeMouseClick(object sender, TreeNodeMouseClickEventArgs e)
     {
-        if (_leftMode != WorkspaceLeftMode.Files || _workspace.Active == null) return;
-        if (!_workspaceNodes.TryGetValue(_workspace.Active.FilePath, out var node)) return;
-        _workspaceTree.SelectedNode = node;
-        node.EnsureVisible();
+        if (e.Button == MouseButtons.Left && e.Node?.Tag is WorkspaceFile file)
+            OpenWorkspaceFile(file);
+    }
+
+    private void WorkspaceTree_NodeMouseDoubleClick(object sender, TreeNodeMouseClickEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left && e.Node?.Tag is WorkspaceFile file && OpenWorkspaceFile(file))
+            SetLeftMode(WorkspaceLeftMode.ObjectTree);
     }
 
     private void WorkspaceTree_MouseDown(object sender, MouseEventArgs e)
@@ -889,18 +910,24 @@ public partial class PackageView
         }
     }
 
-    private void OpenWorkspaceFile(WorkspaceFile file)
+    private bool OpenWorkspaceFile(WorkspaceFile file)
     {
-        if (file == null) return;
+        if (file == null) return false;
         if (file.IsMissing)
         {
             MessageBox.Show(this, $"文件已不在磁盘上：\n{file.Path}\n\n请重新导入，或从工作区移除。", "文件缺失",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
+            return false;
         }
 
-        _workspace.OpenFile(file);
+        // The first click already bound the active document. A second click should only
+        // change the navigation view, without rebuilding its object tree or textures.
+        var existing = _workspace.FindDocument(file.Path);
+        if (existing != null && ReferenceEquals(existing, _workspace.Active) && ReferenceEquals(existing, _boundDocument))
+            return true;
+        var document = _workspace.OpenFile(file);
         SetFormDetails();
+        return document != null && ReferenceEquals(_boundDocument, document);
     }
 
     private void RevealWorkspaceFile(WorkspaceFile file)
@@ -1058,8 +1085,12 @@ public partial class PackageView
     }
 
     /// <summary>Called by the extraction progress window once blocks are on disk.</summary>
-    private string ImportExtractedFiles(string groupName, IReadOnlyList<string> paths)
+    private string ImportExtractedFiles(string containerPath, string extractionDirectory, string groupName,
+        IReadOnlyList<string> paths)
     {
+        // Bind provenance before opening documents: saves must already have their session,
+        // independently of how the extraction/browser dialogs are subsequently closed.
+        var registration = _writeBack.RegisterAfterExtraction(containerPath, extractionDirectory);
         var import = _workspace.Import(paths, false, groupName, refreshExisting: true);
         SetLeftMode(WorkspaceLeftMode.Files);
         var opened = _workspace.OpenFirstAvailable(import.Added.Concat(import.Existing), out var failed);
@@ -1070,6 +1101,7 @@ public partial class PackageView
         text += opened == null
             ? failed > 0 ? $"；{failed} 个文件无法解析，未自动打开" : "；没有可打开的文档"
             : $"；已打开 {opened.Caption}";
+        text += "；" + registration;
         _workspace.StatusMessage = text;
         RefreshWorkspaceStructure();
         return text;
@@ -1086,13 +1118,6 @@ public partial class PackageView
         using var browser = new ContainerBrowser(dialog.FileName, ImportExtractedFiles) { Icon = Icon };
         if (browser.ShowDialog(this) != DialogResult.OK) return;
         if (!string.IsNullOrWhiteSpace(browser.ExtractionSummary)) _workspace.StatusMessage = browser.ExtractionSummary;
-        if (browser.ExtractionOutputDirectory != null)
-        {
-            // The ledger registration is additive: re-extractions merge, nothing is lost.
-            var registration = _writeBack.RegisterAfterExtraction(
-                browser.SourceContainerPath, browser.ExtractionOutputDirectory);
-            _workspace.StatusMessage = $"{_workspace.StatusMessage}；{registration}";
-        }
         SetFormDetails();
     }
 
