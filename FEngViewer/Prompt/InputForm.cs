@@ -20,6 +20,7 @@ namespace FEngViewer.Prompt
 		public InputForm()
 		{
 			InitializeComponent();
+			Shown += (_,_) => EditorTheme.Apply(this);
 			BtnOk.Enabled = !string.IsNullOrWhiteSpace(TxtInput.Text);
 			ChkChildren.Visible = false;
 		}

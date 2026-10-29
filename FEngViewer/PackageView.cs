@@ -62,6 +62,7 @@ public partial class PackageView : Form
 		imageList.Images.Add("TreeItem_Message", Resources.TreeItem_Message);
 		imageList.Images.Add("TreeItem_GenericObject", Resources.TreeItem_GenericObject);
 		treeView1.ImageList = imageList;
+		InitializeEditorWorkbench();
 	}
 
 	private void PackageView_Load(object sender, EventArgs e)
@@ -104,17 +105,26 @@ public partial class PackageView : Form
 	private void PopulateTreeView(Package package, IEnumerable<RenderTreeNode> feObjectNodes)
 	{
 		// map group guid to children guids
+		var restoreFlag = _restoringTree;
+		_restoringTree = true;
 		treeView1.BeginUpdate();
+		try
+		{
 		treeView1.Nodes.Clear();
 
 		_rootNode = treeView1.Nodes.Add(package.Name);
+		_rootNode.Name = "package";
 
-		var resourceListNode = _rootNode.Nodes.Add("Resources");
+		if (!_simpleTree)
+		{
+		var resourceListNode = _rootNode.Nodes.Add("资源请求");
+		resourceListNode.Name = "resources";
 		resourceListNode.ImageKey = resourceListNode.SelectedImageKey = "TreeItem_ResourceList";
 
 		foreach (var resourceRequest in package.ResourceRequests)
 		{
-			var resourceRequestNode = resourceListNode.Nodes.Add(resourceRequest.Name);
+			var resourceRequestNode = resourceListNode.Nodes.Add(resourceRequest.Name ?? $"0x{resourceRequest.ID:X8}");
+			resourceRequestNode.Name = $"resource:{resourceRequest.ID:X8}";
 			resourceRequestNode.Tag = resourceRequest;
 
 			resourceRequestNode.ImageKey = resourceRequestNode.SelectedImageKey = resourceRequest.Type switch
@@ -130,33 +140,38 @@ public partial class PackageView : Form
 			};
 		}
 
-#if DEBUG
-		var messageResponseListNode = _rootNode.Nodes.Add("MessageResponse");
+		var messageResponseListNode = _rootNode.Nodes.Add("消息响应");
+		messageResponseListNode.Name = "messages";
 		messageResponseListNode.ImageKey = messageResponseListNode.SelectedImageKey = "TreeItem_Message";
 		foreach (var messageResponses in package.MessageResponses)
 		{
 			var name = AppService.Instance.HashResolver.ResolveNameHash(null, messageResponses.Id);
 			var messageResponseNode = messageResponseListNode.Nodes.Add(name ?? messageResponses.Id.ToString());
+			messageResponseNode.Name = $"messages/response:{messageResponseNode.Index}";
 			messageResponseNode.Tag = messageResponses;
 		}
 
-		var messageDefinitionsListNode = _rootNode.Nodes.Add("MessageDefinitions");
+		var messageDefinitionsListNode = _rootNode.Nodes.Add("消息定义");
+		messageDefinitionsListNode.Name = "definitions";
 		messageDefinitionsListNode.ImageKey = messageDefinitionsListNode.SelectedImageKey = "TreeItem_Message";
 		foreach (var messageDefinitions in package.MessageDefinitions)
 		{
 			var messageDefinitionsNode = messageDefinitionsListNode.Nodes.Add(messageDefinitions.Name);
+			messageDefinitionsNode.Name = $"definitions/item:{messageDefinitionsNode.Index}";
 			messageDefinitionsNode.Tag = messageDefinitions;
 		}
 
-		var messageTargetsNodeList = _rootNode.Nodes.Add("MessageTargets");
+		var messageTargetsNodeList = _rootNode.Nodes.Add("消息目标");
+		messageTargetsNodeList.Name = "targets";
 		messageTargetsNodeList.ImageKey = messageTargetsNodeList.SelectedImageKey = "TreeItem_Message";
 		foreach (var messageTargetsLists in package.MessageTargetLists)
 		{
 			var name = AppService.Instance.HashResolver.ResolveNameHash(null, messageTargetsLists.MsgId);
 			var messageTargetsNode = messageTargetsNodeList.Nodes.Add(name ?? messageTargetsLists.MsgId.ToString());
+			messageTargetsNode.Name = $"targets/item:{messageTargetsNode.Index}";
 			messageTargetsNode.Tag = messageTargetsLists;
 		}
-#endif
+		}
 
 		//var objectListNode = rootNode.Nodes.Add("Objects");
 		//objectListNode.ImageKey = "TreeItem_ObjectList";
@@ -164,13 +179,14 @@ public partial class PackageView : Form
 
 		_rootNode.Expand();
 		// treeView1.ExpandAll();
-		treeView1.EndUpdate();
 
 		if (_expandTreeButton != null) _expandTreeButton.Text = "⊟";
 		treeView1.SelectedNode = _rootNode;
+		}
+		finally { treeView1.EndUpdate(); _restoringTree = restoreFlag; }
 	}
 
-	private static void ApplyObjectsToTreeNodes(IEnumerable<RenderTreeNode> objectNodes,
+	private void ApplyObjectsToTreeNodes(IEnumerable<RenderTreeNode> objectNodes,
 		TreeNodeCollection treeNodes)
 	{
 		foreach (var feObjectNode in objectNodes)
@@ -181,7 +197,7 @@ public partial class PackageView : Form
 		}
 	}
 
-	private static TreeNode CreateObjectTreeNode(TreeNodeCollection collection, RenderTreeNode viewNode)
+	private TreeNode CreateObjectTreeNode(TreeNodeCollection collection, RenderTreeNode viewNode)
 	{
 		var feObj = viewNode.GetObject();
 		var nodeImageKey = feObj.Type switch
@@ -201,19 +217,20 @@ public partial class PackageView : Form
 			_ => "TreeItem_GenericObject"
 		};
 
-		var nodeText = PackageViewExtensions.GetObjectText(feObj);
+		var nodeText = PackageViewExtensions.GetObjectText(feObj) + (feObj.Flags.HasFlag(ObjectFlags.Invisible) ? "（隐藏）" : "");
 		var objTreeNode = collection.Add(nodeText);
 		objTreeNode.Tag = viewNode;
 		objTreeNode.Name = PackageViewExtensions.GetObjectTreeKey(feObj);
 		if (nodeImageKey != null)
 			objTreeNode.ImageKey = objTreeNode.SelectedImageKey = nodeImageKey;
 
+		if (!_simpleTree)
+		{
 		foreach (var script in feObj.GetScripts())
 			CreateScriptTreeNode(objTreeNode.Nodes, script);
-#if DEBUG
 		foreach (var messageResponses in feObj.MessageResponses)
 			CreateMessageResponses(objTreeNode.Nodes, messageResponses);
-#endif
+		}
 
 		return objTreeNode;
 	}
@@ -222,6 +239,7 @@ public partial class PackageView : Form
 	{
 		var name = AppService.Instance.HashResolver.ResolveNameHash(null, messageResponse.Id);
 		var node = collection.Add(name ?? messageResponse.Id.ToString());
+		node.Name = $"{node.Parent?.Name}/response:{node.Index}";
 		// ReSharper disable once LocalizableElement
 		node.ImageKey = node.SelectedImageKey = "TreeItem_Message";
 		node.Tag = messageResponse;
@@ -234,6 +252,7 @@ public partial class PackageView : Form
 				nameResponse = AppService.Instance.HashResolver.ResolveNameHash(null, message.IntParam.Value);
 			}
 			var eventNode = node.Nodes.Add(nameResponse ?? (message.IntParam.HasValue ? "IntParam " + message.IntParam.ToString() : "Id " + message.Id.ToString()));
+			eventNode.Name = $"{node.Name}/response:{eventNode.Index}";
 			eventNode.ImageKey = eventNode.SelectedImageKey = "TreeItem_Message";
 			eventNode.Tag = message;
 		}
@@ -242,6 +261,7 @@ public partial class PackageView : Form
 	private static void CreateScriptTreeNode(TreeNodeCollection collection, Script script)
 	{
 		var node = collection.Add(script.Name ?? $"0x{script.Id:X}");
+		node.Name = $"{node.Parent?.Name}/script:{script.Id:X8}";
 		// ReSharper disable once LocalizableElement
 		node.ImageKey = node.SelectedImageKey = "TreeItem_Script";
 		node.Tag = script;
@@ -250,6 +270,7 @@ public partial class PackageView : Form
 		{
 			var eventNode =
 				node.Nodes.Add($"0x{scriptEvent.EventId:X} -> {scriptEvent.Target:X} @ T={scriptEvent.Time}");
+			eventNode.Name = $"{node.Name}/event:{eventNode.Index}";
 			eventNode.ImageKey = eventNode.SelectedImageKey = "TreeItem_ScriptEvent";
 			eventNode.Tag = scriptEvent;
 		}
@@ -285,13 +306,15 @@ public partial class PackageView : Form
 		if (track == null)
 			return;
 
-		var trackNode = scriptNode.Nodes.Add(name);
+		var trackNode = scriptNode.Nodes.Add(EditorStrings.Translate(name));
+		trackNode.Name = $"{scriptNode.Name}/track:{name}";
 		trackNode.ImageKey = trackNode.SelectedImageKey = "TreeItem_ScriptTrack";
 		trackNode.Tag = track;
 
 		void AddNodeKey<T>(int time, object value, T tag) where T : TrackNode
 		{
 			var node = trackNode.Nodes.Add($"T={time}: {value}");
+			node.Name = $"{trackNode.Name}/key:{trackNode.Nodes.Count-1}";
 			node.ImageKey = node.SelectedImageKey = "TreeItem_Keyframe";
 			node.Tag = tag;
 		}
@@ -381,23 +404,27 @@ public partial class PackageView : Form
 
 	private void treeView1_AfterSelect(object sender, TreeViewEventArgs e)
 	{
-		if (_currentPackage == null)
+		if (_restoringTree || _currentPackage == null)
 			return;
 
 		if (e.Node == _rootNode && _rootNode != null)
 		{
-			LblChildsCount.Text = "Children: " + _currentPackage.Objects.Where(x => x.Parent == null).Count().ToString("D5") + " | Total: " + CountChildren(null);
+			viewOutput.SelectedNode = null;
+			if (!_restoringTree && (_boundDocument ?? ActiveDocument) is { } owner) owner.SelectedGuid = null;
+			LblChildsCount.Text = "子对象：" + _currentPackage.Objects.Where(x => x.Parent == null).Count().ToString("D5") + " | 总计：" + CountChildren(null);
 			// The package root has no editable object, so show the panel's empty state.
 			SetPropertyTarget(null);
 		}
 		else if (e.Node?.Tag is RenderTreeNode viewNode)
 		{
+			if ((_boundDocument ?? ActiveDocument) is { } owner) owner.SelectedGuid = viewNode.GetObject().Guid;
+			viewOutput.PrepareLayout();
 			viewOutput.SelectedNode = viewNode;
 			var wrappedObject = viewNode.GetObject();
-			LblItemIndex.Text = "Index: " + _currentPackage.Objects.IndexOf(wrappedObject).ToString("D5");
+			LblItemIndex.Text = "索引：" + _currentPackage.Objects.IndexOf(wrappedObject).ToString("D5");
 			if (wrappedObject is Group)
-				LblChildsCount.Text = "Children: " + _currentPackage.Objects.Where(x => wrappedObject.NameHash == x.Parent?.NameHash && wrappedObject.Guid == x.Parent?.Guid).Count().ToString("D5")
-					 + " | Total: " + CountChildren(wrappedObject);
+				LblChildsCount.Text = "子对象：" + _currentPackage.Objects.Where(x => wrappedObject.NameHash == x.Parent?.NameHash && wrappedObject.Guid == x.Parent?.Guid).Count().ToString("D5")
+					 + " | 总计：" + CountChildren(wrappedObject);
 			SetPropertyTarget(wrappedObject switch
 			{
 				Text t => new TextObjectViewWrapper(t, AppService.Instance.HashResolver),
@@ -406,20 +433,18 @@ public partial class PackageView : Form
 				_ => new DefaultObjectViewWrapper(wrappedObject, AppService.Instance.HashResolver)
 			});
 		}
-#if DEBUG
 		else if (e.Node?.Tag is Script script)
 		{
+			viewOutput.SelectedNode = e.Node.Parent?.Tag as RenderTreeNode;
+			if ((_boundDocument ?? ActiveDocument) is { } owner) owner.SelectedGuid = viewOutput.SelectedNode?.GetObject().Guid;
 			SetPropertyTarget(new DefaultScriptViewWrapper(script, AppService.Instance.HashResolver));
 		}
-#endif
 		else
 		{
+			viewOutput.SelectedNode = FindTreeOwner(e.Node);
+			if ((_boundDocument ?? ActiveDocument) is { } owner) owner.SelectedGuid = viewOutput.SelectedNode?.GetObject().Guid;
 
-#if DEBUG
 			SetPropertyTarget(e.Node?.Tag);
-#else
-			SetPropertyTarget(null);
-#endif
 			LblItemIndex.Text = null;
 			LblChildsCount.Text = null;
 		}
@@ -451,46 +476,7 @@ public partial class PackageView : Form
 			return;
 		}
 
-		if (_currentRenderTree == null || !viewOutput.PreviewViewport.Contains(e.Location))
-			return;
-
-		bool WithinBounds(RenderTreeNode node, float x, float y)
-		{
-			var extents = node.Get2DExtents();
-
-			return extents.HasValue && extents.Value.Contains((int)x, (int)y);
-		}
-
-		var fe = ToFePoint(e.Location);
-		var feX = fe.X;
-		var feY = fe.Y;
-
-		// get highest Z rendertreenode with the click location in bounds
-		var renderTree = RenderTree.GetAllTreeNodesForRendering(_currentRenderTree);
-		try
-		{
-			var candidates = renderTree
-				.Where(node => WithinBounds(node, feX, feY))
-				//.OrderByDescending(n => n.GetZ());
-				.OrderBy(node => // smallest area first => most "specific" candidate wins
-				{
-					var sz = node.Get2DExtents().Value.Size;
-					return sz.Height * sz.Width; // area 
-				});
-
-			var top = candidates.First();
-
-			var feObj = top.GetObject();
-			var key = PackageViewExtensions.GetObjectTreeKey(feObj);
-			var foundNodes = treeView1.Nodes.Find(key, true);
-			treeView1.SelectedNode = foundNodes[0];
-			treeView1.Focus();
-		}
-		catch (Exception)
-		{
-			// if linq stuff didn't find anything -
-			// ignored
-		}
+		// Canvas hit testing and selection are handled once, on mouse-down, by GLRenderControl.
 	}
 
 	public static IEnumerable<TreeNode> FlattenTree(TreeView tv)
@@ -537,11 +523,15 @@ public partial class PackageView : Form
 		if (_currentPackage == null)
 			return;
 
-		var document = _workspace.Active;
+		var document = _boundDocument ?? _workspace.Active;
+		var expanded = FlattenTree(treeView1).Where(n => n.IsExpanded).Select(n => n.Name).ToHashSet();
+		var topKey = treeView1.TopNode?.Name;
 		_workspace.MarkDirty(document);
 		_currentRenderTree = RenderTree.Create(_currentPackage);
+		RenderGeometry.Prepare(_currentRenderTree);
 		if (document != null) _documentTrees[document] = new RenderCache(_currentRenderTree, document.ModelVersion);
 		PopulateTreeView(_currentPackage, _currentRenderTree);
+		foreach (var item in FlattenTree(treeView1)) if (expanded.Contains(item.Name)) item.Expand();
 
 		if (!string.IsNullOrWhiteSpace(treeKey))
 		{
@@ -549,15 +539,20 @@ public partial class PackageView : Form
 			if (foundNodes.Length > 0)
 			{
 				treeView1.SelectedNode = foundNodes.First();
-				treeView1.SelectedNode.Expand();
 			}
-			treeView1.Focus();
 		}
 		else
 		{
 			viewOutput.SelectedNode = null;
 		}
+		if (treeView1.SelectedNode == _rootNode)
+			treeView1_AfterSelect(treeView1, new TreeViewEventArgs(_rootNode));
 		Render();
+		if (!string.IsNullOrEmpty(topKey))
+		{
+			var top = treeView1.Nodes.Find(topKey, true).FirstOrDefault();
+			if (top != null) treeView1.TopNode = top;
+		}
 
 		SetFormDetails();
 	}
@@ -579,7 +574,7 @@ public partial class PackageView : Form
 		{
 			var viewNode = (RenderTreeNode)hit_node.Parent.Tag;
 
-			toggleScriptMenuItem.Text = ReferenceEquals(viewNode.GetCurrentScript(), script) ? "Stop" : "Start";
+			toggleScriptMenuItem.Text = viewOutput.IsPreviewOf(viewNode.GetObject(), script.Id) ? "回到初始布局" : "播放";
 
 			scriptContextMenu.Show(treeView1, ctxPoint);
 		}
@@ -590,7 +585,8 @@ public partial class PackageView : Form
 		if (treeView1.SelectedNode?.Tag is Script script)
 		{
 			var viewNode = (RenderTreeNode)treeView1.SelectedNode.Parent.Tag;
-			viewNode.SetCurrentScript(ReferenceEquals(viewNode.GetCurrentScript(), script) ? null : script.Id);
+			if (viewOutput.IsPreviewOf(viewNode.GetObject(), script.Id)) viewOutput.ResetPreview();
+			else viewOutput.StartPreview(viewNode.GetObject(), script.Id);
 		}
 	}
 
@@ -812,7 +808,14 @@ public partial class PackageView : Form
 			if (oldIndex == newIndex)
 				return;
 
-			_packageViewExtensions.ObjectSelected.Parent = selectedObject is Group && selectedObject == lastChild ? selectedObject : selectedObject.Parent;
+			var newParent = selectedObject is Group && selectedObject == lastChild ? selectedObject : selectedObject.Parent;
+			for (var ancestor = newParent; ancestor != null; ancestor = ancestor.Parent)
+				if (ReferenceEquals(ancestor, _packageViewExtensions.ObjectSelected))
+				{
+					MessageBox.Show(this, "不能把组移动到自己的子组中。", "无法移动");
+					return;
+				}
+			_packageViewExtensions.ObjectSelected.Parent = newParent;
 			_packageViewExtensions.MoveItem(oldIndex, newIndex);
 			_packageViewExtensions.MoveChildren(_packageViewExtensions.ObjectSelected);
 

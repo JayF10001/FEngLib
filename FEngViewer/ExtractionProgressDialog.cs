@@ -65,6 +65,7 @@ internal sealed class ExtractionProgressDialog : Form
         Size = new Size(760, 560);
         MinimumSize = new Size(620, 420);
         ShowInTaskbar = false;
+        Shown += (_,_) => EditorTheme.Apply(this);
         FormBorderStyle = FormBorderStyle.SizableToolWindow;
         MaximizeBox = false;
         MinimizeBox = false;

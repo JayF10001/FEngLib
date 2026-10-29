@@ -9,6 +9,7 @@
 
     <ItemGroup>
         <ProjectReference Include="..\FEngLib\FEngLib.csproj"/>
+        <ProjectReference Include="..\FEngRender\FEngRender.csproj"/>
     </ItemGroup>
 
 </Project>

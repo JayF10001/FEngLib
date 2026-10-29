@@ -72,6 +72,8 @@ public partial class PackageView
     private Label _statusLeft;
     private Label _statusRight;
     private ContextMenuStrip _workspaceMenu;
+    private ContextMenuStrip _tabContextMenu;
+    private ToolStripMenuItem _recentDocumentsMenu;
     private Font _boldNodeFont;
     private ImageList _workspaceIcons;
 
@@ -110,7 +112,11 @@ public partial class PackageView
 
         objectPropertyGrid.PropertyValueChanged += (_, _) =>
         {
-            if (_workspace.Active != null) _workspace.MarkDirty(_workspace.Active);
+            if ((_boundDocument ?? _workspace.Active) is { } document)
+            {
+                document.History?.Commit("编辑高级属性");
+                CurrentPackageWasModified(treeView1.SelectedNode?.Name);
+            }
         };
 
         TxtSearch.TextChanged += TxtSearch_TextChanged;
@@ -141,8 +147,6 @@ public partial class PackageView
             _workspace.Close(_workspace.Documents[index]);
         };
         _tabBar.ContextMenuRequested += ShowTabContextMenu;
-        _tabBar.NewTabRequested += OpenFilesDialog;
-        _tabBar.MenuRequested += ShowTabMenu;
         _tabBar.ReorderRequested += (from, to) => _workspace.Move(from, to);
     }
 
@@ -400,6 +404,9 @@ public partial class PackageView
         items.Add(CreateMenuItem("Open FNG...", Keys.Control | Keys.O, (_, _) => OpenFilesDialog()));
         items.Add(CreateMenuItem("Open container...", Keys.None, OpenContainerMenuItem_Click));
         items.Add(CreateMenuItem("Open FNG folder...", Keys.None, (_, _) => OpenFngFolder()));
+        _recentDocumentsMenu = new ToolStripMenuItem("最近打开(&R)") { Enabled = false };
+        items.Add(_recentDocumentsMenu);
+        FileMenuItem.DropDownOpening += (_, _) => RefreshRecentDocumentsMenu();
         items.Add(new ToolStripSeparator());
         items.Add(CreateMenuItem("Save", Keys.Control | Keys.S, (_, _) => SaveActiveDocument(false)));
         items.Add(CreateMenuItem("Save as...", Keys.Control | Keys.Shift | Keys.S, (_, _) => SaveActiveDocument(true)));
@@ -479,6 +486,9 @@ public partial class PackageView
 
     private void RefreshWorkspaceStructure()
     {
+        var opened = _workspace.Documents.ToHashSet();
+        foreach(var document in _documentTrees.Keys.Where(d=>!opened.Contains(d)).ToArray()) _documentTrees.Remove(document);
+        foreach(var key in _treeViews.Keys.Where(k=>!opened.Contains(k.Item1)).ToArray()) _treeViews.Remove(key);
         UpdateTabBar();
         RebuildWorkspaceTree();
         UpdateFileCountHint();
@@ -504,6 +514,7 @@ public partial class PackageView
         else _tabBar.SetItems(items);
         var index = _workspace.IndexOfDocument(_workspace.Active);
         _tabBar.SelectedIndex = index;
+        _tabBar.Visible = items.Length > 0;
     }
 
     private void PackageView_FormClosing(object sender, FormClosingEventArgs e)
@@ -520,6 +531,7 @@ public partial class PackageView
 
     private void BindDocument(WorkspaceDocument document)
     {
+        ValidateChildren();
         RememberEditorState();
         if (document?.Package == null)
         {
@@ -533,6 +545,9 @@ public partial class PackageView
             _boundDocument = document;
             _currentPackage = document.Package;
             _currentRenderTree = GetRenderTree(document);
+            RenderGeometry.Prepare(_currentRenderTree);
+            viewOutput.ResetPreview();
+            viewOutput.SetView(document.CanvasZoom <= 0 ? 1 : document.CanvasZoom, document.CanvasPan, document.CanvasFit);
             AppService.Instance.ActivatePackage(document.Package, document.FilePath, document.IsJson);
             viewOutput.Init(document.TextureDirectory);
             _packageViewExtensions.ObjectSelected = null;
@@ -549,6 +564,7 @@ public partial class PackageView
             viewOutput.SelectedNode = null;
             PopulateTreeView(document.Package, _currentRenderTree);
             RestoreTreeSelection(document.SelectedTreeKey);
+            RestoreTreeView();
             Render();
             RememberRecentDocument(document);
         }
@@ -587,6 +603,11 @@ public partial class PackageView
     {
         var document = _boundDocument;
         if (document == null) return;
+        viewOutput.CancelInteraction();
+        document.CanvasZoom = viewOutput.Zoom;
+        document.CanvasPan = viewOutput.Pan;
+        document.CanvasFit = viewOutput.Fit;
+        RememberTreeView();
         document.SelectedTreeKey = treeView1.SelectedNode?.Name;
         if (_leftMode == WorkspaceLeftMode.ObjectTree) document.SearchText = TxtSearch.Text;
         document.SearchIndex = _packageViewExtensions.SearchIndex;
@@ -594,6 +615,8 @@ public partial class PackageView
 
     private void ShowEmptyEditor()
     {
+        viewOutput.CancelInteraction();
+        viewOutput.ResetPreview();
         _boundDocument = null;
         _currentPackage = null;
         _currentRenderTree = null;
@@ -612,8 +635,8 @@ public partial class PackageView
         SetPropertyTarget(null);
         viewOutput.SelectedNode = null;
         viewOutput.Render(null);
-        LblItemIndex.Text = "Index: 00000";
-        LblChildsCount.Text = "Children: 00000";
+        LblItemIndex.Text = "索引：00000";
+        LblChildsCount.Text = "子对象：00000";
         RefreshWorkspaceState();
     }
 
@@ -645,10 +668,10 @@ public partial class PackageView
         _workspaceTree.Visible = mode == WorkspaceLeftMode.Files;
         treeView1.Visible = mode == WorkspaceLeftMode.ObjectTree;
         var files = mode == WorkspaceLeftMode.Files;
-        _filesModeButton.BackColor = files ? SystemColors.Highlight : SystemColors.Control;
-        _filesModeButton.ForeColor = files ? SystemColors.HighlightText : SystemColors.ControlText;
-        _treeModeButton.BackColor = files ? SystemColors.Control : SystemColors.Highlight;
-        _treeModeButton.ForeColor = files ? SystemColors.ControlText : SystemColors.HighlightText;
+        _filesModeButton.BackColor = files ? SystemColors.Highlight : EditorTheme.Surface;
+        _filesModeButton.ForeColor = files ? SystemColors.HighlightText : EditorTheme.Text;
+        _treeModeButton.BackColor = files ? EditorTheme.Surface : SystemColors.Highlight;
+        _treeModeButton.ForeColor = files ? EditorTheme.Text : SystemColors.HighlightText;
         _fileExtras.Visible = files;
         _treeExtras.Visible = !files;
         UpdateFileCountHint();
@@ -1329,7 +1352,7 @@ public partial class PackageView
     {
         if (index < 0 || index >= _workspace.Documents.Count) return;
         var document = _workspace.Documents[index];
-        var menu = new ContextMenuStrip(components);
+        var menu = PrepareTabMenu(ref _tabContextMenu);
         var close = new ToolStripMenuItem("关闭标签");
         close.Click += (_, _) => _workspace.Close(document);
         var closeOthers = new ToolStripMenuItem("关闭其他标签") { Enabled = _workspace.Documents.Count > 1 };
@@ -1339,37 +1362,31 @@ public partial class PackageView
         var reveal = new ToolStripMenuItem("在文件夹中显示");
         reveal.Click += (_, _) => RevealWorkspaceFile(new WorkspaceFile(document.FilePath, document.IsJson));
         menu.Items.AddRange(new ToolStripItem[] { close, closeOthers, closeAll, new ToolStripSeparator(), reveal });
-        menu.Closed += (_, _) => menu.Dispose();
+        EditorTheme.Apply(menu);
         menu.Show(Cursor.Position);
     }
 
-    private void ShowTabMenu(Point screenPoint)
+    private void RefreshRecentDocumentsMenu()
     {
-        var menu = new ContextMenuStrip(components);
-        menu.Items.Add(new ToolStripMenuItem("打开 FNG 文件...", null, (_, _) => OpenFilesDialog()));
-        if (_recentDocuments.Count > 0)
+        while (_recentDocumentsMenu.DropDownItems.Count > 0)
+            _recentDocumentsMenu.DropDownItems[0].Dispose();
+        _recentDocumentsMenu.Enabled = _recentDocuments.Count > 0;
+        foreach (var path in _recentDocuments.Take(8))
         {
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(new ToolStripMenuItem("最近打开的文档") { Enabled = false });
-            foreach (var path in _recentDocuments.Take(8))
-            {
-                var item = new ToolStripMenuItem(Path.GetFileName(path)) { ToolTipText = path };
-                item.Click += (_, _) => OpenWorkspacePath(path);
-                menu.Items.Add(item);
-            }
+            var item = new ToolStripMenuItem(Path.GetFileName(path)) { ToolTipText = path };
+            item.Click += (_, _) => OpenWorkspacePath(path);
+            _recentDocumentsMenu.DropDownItems.Add(item);
         }
+        EditorTheme.Apply(_recentDocumentsMenu.DropDown);
+    }
 
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("关闭其他标签", null, (_, _) => _workspace.CloseOthers(_workspace.Active))
-        {
-            Enabled = _workspace.Documents.Count > 1
-        });
-        menu.Items.Add(new ToolStripMenuItem("关闭所有标签", null, (_, _) => _workspace.CloseAll())
-        {
-            Enabled = _workspace.Documents.Count > 0
-        });
-        menu.Closed += (_, _) => menu.Dispose();
-        menu.Show(_tabBar, _tabBar.PointToClient(screenPoint));
+    private ContextMenuStrip PrepareTabMenu(ref ContextMenuStrip menu)
+    {
+        // WinForms still reparents the dropdown after raising Closed. Disposing it in that
+        // event breaks the active menu message filter. Keep it owned by the form instead.
+        menu ??= new ContextMenuStrip(components);
+        while (menu.Items.Count > 0) menu.Items[0].Dispose();
+        return menu;
     }
 
     private void OpenWorkspacePath(string path)
@@ -1487,7 +1504,7 @@ public partial class PackageView
 
         var title = "FEngViewer";
         if (_workspace.FileCount > 0)
-            title += $" - {_workspace.DisplayName ?? "Workspace"} Workspace ({_workspace.FileCount} files)";
+            title += $" - {_workspace.DisplayName ?? "Workspace"} 工作区（{_workspace.FileCount} 个文件）";
         else if (active != null)
             title += $" - {active.CaptionName}";
 #if DEBUG

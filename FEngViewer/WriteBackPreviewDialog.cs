@@ -22,6 +22,7 @@ internal sealed class WriteBackPreviewDialog : Form
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;
         ShowInTaskbar = false;
+        Shown += (_,_) => EditorTheme.Apply(this);
         FormBorderStyle = FormBorderStyle.SizableToolWindow;
         MaximizeBox = false;
         ClientSize = new Size(760, 460);

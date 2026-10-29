@@ -290,7 +290,7 @@ namespace FEngViewer
 			this.LblChildsCount.Name = "LblChildsCount";
 			this.LblChildsCount.Size = new System.Drawing.Size(88, 15);
 			this.LblChildsCount.TabIndex = 1;
-			this.LblChildsCount.Text = "Children: 00000";
+			this.LblChildsCount.Text = "子对象：00000";
 			// 
 			// LblItemIndex
 			// 
@@ -300,7 +300,7 @@ namespace FEngViewer
 			this.LblItemIndex.Name = "LblItemIndex";
 			this.LblItemIndex.Size = new System.Drawing.Size(72, 15);
 			this.LblItemIndex.TabIndex = 0;
-			this.LblItemIndex.Text = "Index: 00000";
+			this.LblItemIndex.Text = "索引：00000";
 			this.LblItemIndex.TextAlign = System.Drawing.ContentAlignment.TopRight;
 			// 
 			// viewerContextMenu

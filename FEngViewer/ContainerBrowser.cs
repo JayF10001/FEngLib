@@ -61,6 +61,7 @@ internal sealed class ContainerBrowser : Form
         Size = new Size(1000, 620);
         MinimumSize = new Size(760, 460);
         ShowInTaskbar = false;
+        Shown += (_,_) => EditorTheme.Apply(this);
 
         _entries.Columns.Add("Name", 280);
         _entries.Columns.Add("Type", 100);

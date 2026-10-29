@@ -24,4 +24,6 @@ public interface IRenderControl
 
     /// <summary>Maps a control-space point into the logical 640x480 HUD space.</summary>
     PointF ScreenToLogical(Point point);
+    PointF LogicalToScreen(PointF point);
+    void SetView(float zoom, PointF pan, bool fit);
 }

@@ -237,7 +237,7 @@ public partial class PackageView
         _propertyHeader = new Panel { Dock = DockStyle.Top, Margin = Padding.Empty };
         var propertyTitle = new Label
         {
-            Text = "Properties",
+            Text = "属性",
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
             Padding = new Padding(6, 0, 0, 0),
@@ -272,7 +272,8 @@ public partial class PackageView
         groupBox1.Dock = DockStyle.Bottom;
         groupBox1.Margin = new Padding(0, 2, 0, 0);
 
-        _innerSplit.Panel2.Controls.Add(objectPropertyGrid);
+        _inspector = new ObjectInspector(objectPropertyGrid);
+        _innerSplit.Panel2.Controls.Add(_inspector);
         _innerSplit.Panel2.Controls.Add(_propertyEmptyLabel);
         _innerSplit.Panel2.Controls.Add(_propertyHeader);
         _innerSplit.Panel2.Controls.Add(groupBox1);
@@ -309,7 +310,7 @@ public partial class PackageView
     private void UpdatePreviewScaleLabel()
     {
         if (_previewScaleLabel == null) return;
-        _previewScaleLabel.Text = PreviewLayout.Describe(viewOutput.PreviewViewport, viewOutput.PreviewAspect);
+        _previewScaleLabel.Text = $"{PreviewLayout.CanvasSize(viewOutput.PreviewAspect).Width:0.#}×480 @ {viewOutput.Zoom*100:0}%";
     }
 
     private void ApplyPreviewAspectFromState(string name)
@@ -461,6 +462,7 @@ public partial class PackageView
             RightWidth = _rightWidth,
             PreviewAspect = PreviewLayout.ModeName(viewOutput.PreviewAspect),
             LeftMode = _leftMode == WorkspaceLeftMode.Files ? "files" : "tree"
+            ,SimpleTree = _simpleTree, DarkTheme = EditorTheme.Dark
         };
         // Save the preferred widths, not the ones clamped by the current (possibly small) window; the
         // restore path clamps them again to whatever window the next session opens with.
@@ -484,7 +486,10 @@ public partial class PackageView
     /// <summary>Selects the property target and shows/hides the empty-state overlay.</summary>
     private void SetPropertyTarget(object target)
     {
-        objectPropertyGrid.SelectedObject = target;
+        var localized=target==null?null:new LocalizedProperties(target,EditAdvanced);
+        objectPropertyGrid.SelectedObject = localized;
+        _inspector?.ShowTarget(localized, target==null?null:FindTreeOwner(treeView1.SelectedNode), _currentPackage,
+            (_boundDocument ?? ActiveDocument)?.TextureDirectory, treeView1.SelectedNode?.Tag is not FEngRender.Data.RenderTreeNode);
         if (_propertyEmptyLabel != null) _propertyEmptyLabel.Visible = target == null;
     }
 }

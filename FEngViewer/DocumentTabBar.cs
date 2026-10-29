@@ -9,7 +9,7 @@ namespace FEngViewer;
 
 /// <summary>
 /// Lightweight document tab strip: name plus unsaved marker, close buttons, horizontal scrolling,
-/// middle/right click actions, drag reordering and the "new/recent" buttons.
+/// middle/right click actions and drag reordering.
 /// It is only a header; the editor controls stay in one place and are never reparented.
 /// </summary>
 internal sealed class DocumentTabBar : Control
@@ -35,7 +35,6 @@ internal sealed class DocumentTabBar : Control
     private int MaxTabWidth => Math.Max(160, LineHeight * 12);
     private int TabPadding => Math.Max(6, LineHeight / 2);
     private int CloseBoxSize => Math.Max(12, LineHeight - 2);
-    private int ButtonSize => Math.Max(18, LineHeight + 4);
     private int ScrollButtonWidth => Math.Max(16, LineHeight + 2);
     private int TabGap => Math.Max(2, LineHeight / 8);
 
@@ -49,8 +48,6 @@ internal sealed class DocumentTabBar : Control
     private int _scrollOffset;
     private int _hoverIndex = -1;
     private bool _hoverClose;
-    private bool _hoverNew;
-    private bool _hoverMenu;
     private int _dragIndex = -1;
     private int _dragTarget = -1;
     private bool _dragging;
@@ -58,8 +55,6 @@ internal sealed class DocumentTabBar : Control
     private ToolTip _toolTip;
     private int _tipIndex = -1;
 
-    private Rectangle _plusRect;
-    private Rectangle _chevronRect;
     private Rectangle _scrollLeftRect;
     private Rectangle _scrollRightRect;
     private bool _overflow;
@@ -76,8 +71,6 @@ internal sealed class DocumentTabBar : Control
     public event Action<int> SelectionRequested;
     public event Action<int> CloseRequested;
     public event Action<int> ContextMenuRequested;
-    public event Action NewTabRequested;
-    public event Action<Point> MenuRequested;
     public event Action<int, int> ReorderRequested;
 
     protected override void OnFontChanged(EventArgs e)
@@ -150,7 +143,7 @@ internal sealed class DocumentTabBar : Control
     {
         get
         {
-            var reserved = _overflow ? 2 * ScrollButtonWidth + ButtonSize + ButtonSize : 0;
+            var reserved = _overflow ? 2 * ScrollButtonWidth : 0;
             return Math.Max(0, Width - reserved);
         }
     }
@@ -222,16 +215,11 @@ internal sealed class DocumentTabBar : Control
             var available = AvailableWidth;
             _scrollLeftRect = new Rectangle(available, top, ScrollButtonWidth, height);
             _scrollRightRect = new Rectangle(available + ScrollButtonWidth, top, ScrollButtonWidth, height);
-            _plusRect = new Rectangle(available + 2 * ScrollButtonWidth + 2, top, ButtonSize, height);
-            _chevronRect = new Rectangle(available + 2 * ScrollButtonWidth + 2 + ButtonSize, top, ButtonSize, height);
         }
         else
         {
-            var afterTabs = Math.Min(ContentWidth + 4, Math.Max(0, Width - 2 * ButtonSize - 2));
             _scrollLeftRect = Rectangle.Empty;
             _scrollRightRect = Rectangle.Empty;
-            _plusRect = new Rectangle(afterTabs, top, ButtonSize, height);
-            _chevronRect = new Rectangle(afterTabs + ButtonSize, top, ButtonSize, height);
         }
     }
 
@@ -242,7 +230,7 @@ internal sealed class DocumentTabBar : Control
         RefreshLayout();
 
         var bottomLine = Height - 1;
-        using (var pen = new Pen(SystemColors.ControlDark))
+        using (var pen = new Pen(EditorTheme.Border))
             g.DrawLine(pen, 0, bottomLine, Width, bottomLine);
 
         var clip = new Rectangle(0, 0, AvailableWidth, Height);
@@ -259,8 +247,6 @@ internal sealed class DocumentTabBar : Control
 
         if (_dragging && _dragTarget >= 0) PaintDropIndicator(g);
 
-        PaintButton(g, _plusRect, _hoverNew, ButtonGlyph.Plus);
-        PaintButton(g, _chevronRect, _hoverMenu, ButtonGlyph.Chevron);
         if (_overflow)
         {
             PaintButton(g, _scrollLeftRect, _hoverIndex == -2, ButtonGlyph.Left);
@@ -274,11 +260,10 @@ internal sealed class DocumentTabBar : Control
         var hovered = index == _hoverIndex && !_dragging;
         var item = _items[index];
 
-        using (var background = new SolidBrush(selected ? SystemColors.Window
-                     : hovered ? SystemColors.ControlLightLight : BackColor))
+        using (var background = new SolidBrush(selected || hovered ? EditorTheme.Input : BackColor))
             g.FillRectangle(background, rect);
 
-        using (var border = new Pen(selected ? SystemColors.ControlDark : SystemColors.ControlLight))
+        using (var border = new Pen(EditorTheme.Border))
         {
             g.DrawLine(border, rect.Left, rect.Top, rect.Right - 1, rect.Top);
             g.DrawLine(border, rect.Left, rect.Top, rect.Left, rect.Bottom - 1);
@@ -292,7 +277,7 @@ internal sealed class DocumentTabBar : Control
         var close = CloseRect(index);
         var textRect = new Rectangle(rect.Left + TabPadding, rect.Top + 2,
             Math.Max(0, close.Left - rect.Left - TabPadding - TabGap * 2), rect.Height - 4);
-        var color = item.HasError ? Color.Firebrick : SystemColors.ControlText;
+        var color = item.HasError ? Color.IndianRed : EditorTheme.Text;
         TextRenderer.DrawText(g, item.Caption, Font, textRect, color,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
 
@@ -315,8 +300,6 @@ internal sealed class DocumentTabBar : Control
 
     private enum ButtonGlyph
     {
-        Plus,
-        Chevron,
         Left,
         Right
     }
@@ -325,24 +308,16 @@ internal sealed class DocumentTabBar : Control
     {
         if (rect.IsEmpty) return;
         if (hot)
-            using (var background = new SolidBrush(SystemColors.ControlLight))
+            using (var background = new SolidBrush(EditorTheme.Input))
                 g.FillRectangle(background, rect);
 
         var centerX = rect.Left + rect.Width / 2;
         var centerY = rect.Top + rect.Height / 2;
-        var arm = Math.Max(4, ButtonSize / 4);
-        using var pen = new Pen(SystemColors.ControlText, 1.5f);
+        var arm = Math.Max(4, ScrollButtonWidth / 4);
+        using var pen = new Pen(EditorTheme.Text, 1.5f);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         switch (glyph)
         {
-            case ButtonGlyph.Plus:
-                g.DrawLine(pen, centerX - arm, centerY, centerX + arm, centerY);
-                g.DrawLine(pen, centerX, centerY - arm, centerX, centerY + arm);
-                break;
-            case ButtonGlyph.Chevron:
-                g.DrawLine(pen, centerX - arm, centerY - 1, centerX, centerY + arm - 1);
-                g.DrawLine(pen, centerX, centerY + arm - 1, centerX + arm, centerY - 1);
-                break;
             case ButtonGlyph.Left:
                 g.DrawLine(pen, centerX + arm / 2, centerY - arm, centerX - arm / 2, centerY);
                 g.DrawLine(pen, centerX - arm / 2, centerY, centerX + arm / 2, centerY + arm);
@@ -389,26 +364,22 @@ internal sealed class DocumentTabBar : Control
     {
         base.OnMouseMove(e);
         var index = HitTest(e.Location, out var onClose);
-        var overNew = PointIn(_plusRect, e.Location);
-        var overMenu = PointIn(_chevronRect, e.Location);
         var overLeft = _overflow && PointIn(_scrollLeftRect, e.Location);
         var overRight = _overflow && PointIn(_scrollRightRect, e.Location);
 
         var hoverIndex = index >= 0 ? index : overLeft ? -2 : overRight ? -3 : -1;
-        if (hoverIndex != _hoverIndex || onClose != _hoverClose || overNew != _hoverNew || overMenu != _hoverMenu)
+        if (hoverIndex != _hoverIndex || onClose != _hoverClose)
         {
             _hoverIndex = hoverIndex;
             _hoverClose = onClose;
-            _hoverNew = overNew;
-            _hoverMenu = overMenu;
             Invalidate();
         }
 
-        if (index >= 0 && index != _tipIndex)
+        if (index != _tipIndex)
         {
             _tipIndex = index;
             _toolTip ??= new ToolTip { ShowAlways = true, InitialDelay = 600, ReshowDelay = 200 };
-            _toolTip.SetToolTip(this, _items[index].ToolTip);
+            _toolTip.SetToolTip(this, index >= 0 ? _items[index].ToolTip : null);
         }
 
         if (_dragIndex < 0 || e.Button != MouseButtons.Left) return;
@@ -435,18 +406,6 @@ internal sealed class DocumentTabBar : Control
     {
         base.OnMouseDown(e);
         Focus();
-        if (PointIn(_plusRect, e.Location))
-        {
-            NewTabRequested?.Invoke();
-            return;
-        }
-
-        if (PointIn(_chevronRect, e.Location))
-        {
-            MenuRequested?.Invoke(PointToScreen(new Point(_chevronRect.Left, _chevronRect.Bottom)));
-            return;
-        }
-
         if (_overflow && PointIn(_scrollLeftRect, e.Location))
         {
             _scrollOffset = Math.Max(0, _scrollOffset - 80);
@@ -510,9 +469,8 @@ internal sealed class DocumentTabBar : Control
         base.OnMouseLeave(e);
         _hoverIndex = -1;
         _hoverClose = false;
-        _hoverNew = false;
-        _hoverMenu = false;
         _tipIndex = -1;
+        _toolTip?.SetToolTip(this, null);
         Invalidate();
     }
 

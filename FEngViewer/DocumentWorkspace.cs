@@ -322,6 +322,7 @@ internal sealed class DocumentWorkspace
         var index = _documents.IndexOf(document);
         var wasActive = ReferenceEquals(document, Active);
         _documents.RemoveAt(index);
+        document.ReleaseEditorHistory();
         if (wasActive)
         {
             Active = null;

@@ -37,6 +37,9 @@ public class GLRenderTreeRenderer
     }
 
     public RenderTreeNode SelectedNode { get; set; }
+    public IObject<ObjectData> PreviewObject { get; set; }
+    public uint? PreviewScript { get; set; }
+    public int PreviewTime { get; set; }
 
     public void PrepareRender()
     {
@@ -75,8 +78,7 @@ public class GLRenderTreeRenderer
         _gl.LoadIdentity();
 
         var dt = (int)(_stopwatch.ElapsedMilliseconds - _lastRenderTime);
-        _gl.DrawText(10, 10, 1, 0, 0, "Consolas", 16, $"dt: {dt}ms");
-        PrepareNodes(tree, Matrix4x4.Identity, dt);
+        RenderGeometry.Prepare(tree, PreviewObject, PreviewScript, PreviewTime);
         RenderTree(tree);
         // _stopwatch.Restart();
 
@@ -223,8 +225,7 @@ public class GLRenderTreeRenderer
     {
         var texture = GetTexture(coloredImage.FrontendObject.ResourceRequest);
 
-        if (texture == null)
-            return;
+        if (texture == null) { RenderMissing(coloredImage, doBoundingBox); return; }
 
         var otkMat4 = coloredImage.Transform * Matrix4x4.CreateTranslation(320, 240, 0);
 
@@ -253,8 +254,7 @@ public class GLRenderTreeRenderer
     {
         var texture = GetTexture(image.FrontendObject.ResourceRequest);
 
-        if (texture == null)
-            return;
+        if (texture == null) { RenderMissing(image, doBoundingBox); return; }
 
         var otkMat4 = image.Transform * Matrix4x4.CreateTranslation(320, 240, 0);
 
@@ -283,8 +283,7 @@ public class GLRenderTreeRenderer
     {
         var texture = GetTexture(image.FrontendObject.ResourceRequest);
 
-        if (texture == null)
-            return;
+        if (texture == null) { RenderMissing(image, doBoundingBox); return; }
 
         var otkMat4 = image.Transform * Matrix4x4.CreateTranslation(320, 240, 0);
 
@@ -326,7 +325,7 @@ public class GLRenderTreeRenderer
 
     private Texture GetTexture(ResourceRequest resource)
     {
-        if (resource is not { Type: ResourceType.Image })
+        if (resource == null || (resource.Type != ResourceType.Image && resource.Type != ResourceType.MultiImage))
         {
             return null;
         }
@@ -349,6 +348,14 @@ public class GLRenderTreeRenderer
 
     private static string CleanResourcePath(string path)
     {
-        return path.Split('\\')[^1].Split('.')[0].ToUpperInvariant();
+        return Path.GetFileNameWithoutExtension((path ?? "").Replace('\\', '/')).ToUpperInvariant();
+    }
+
+    private void RenderMissing(RenderTreeNode node, bool bounds)
+    {
+        var q = new Quad(-0.5f,-0.5f,0.5f,0.5f,1,
+            node.Transform * Matrix4x4.CreateTranslation(320,240,0), Vector2.Zero, Vector2.Zero,
+            Enumerable.Repeat(new Vector4(0.8f,0.15f,0.6f,0.65f),4).ToArray());
+        if (bounds) q.DrawBoundingBox(_gl); else q.Render(_gl);
     }
 }

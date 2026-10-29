@@ -24,7 +24,7 @@ namespace FEngViewer
 		public string SearchText { get; set; }
 		public int SearchIndex { get; set; }
 
-		public static string GetObjectTreeKey(IObject<ObjectData> objectData) => objectData != null ? $"{GetObjectText(objectData)}:{objectData.Guid:X}" : null;
+		public static string GetObjectTreeKey(IObject<ObjectData> objectData) => objectData != null ? $"obj:{objectData.Guid:X8}" : null;
 		public static string GetObjectText(IObject<ObjectData> objectData) => objectData != null ? $"{objectData.Name ?? "0x" + objectData.NameHash.ToString("X")}" : null;
 
 		public IObject<ObjectData> CopyObject(IObject<ObjectData> existingObject, IObject<ObjectData> selectedObject, int? index = null, string objectName = null, string objectNumber = null, int? objectCount = null)
@@ -141,7 +141,7 @@ namespace FEngViewer
 					var groupChildren = CreateChildren(child, newChild, index, objectNumber, objectCount);
 					foreach (var groupChild in groupChildren)
 						newChildren.Add(groupChild.Key, groupChild.Value);
-					index = groupChildren.Keys.Max();
+					if (groupChildren.Count > 0) index = groupChildren.Keys.Max();
 				}
 			}
 

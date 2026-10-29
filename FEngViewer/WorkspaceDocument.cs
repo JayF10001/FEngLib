@@ -1,6 +1,8 @@
 using System;
 using System.IO;
 using FEngLib.Packages;
+using FEngLib.Editing;
+using System.Drawing;
 
 namespace FEngViewer;
 
@@ -35,6 +37,13 @@ internal sealed class WorkspaceDocument
     public bool IsDirty { get; private set; }
 
     public bool IsLoaded => Package != null;
+    public PackageEditHistory History { get; private set; }
+    public float CanvasZoom { get; set; }
+    public PointF CanvasPan { get; set; }
+    public bool CanvasFit { get; set; } = true;
+    public uint? SelectedGuid { get; set; }
+    public string[] ExpandedTreeKeys { get; set; } = Array.Empty<string>();
+    public string TopTreeKey { get; set; }
 
     /// <summary>Last load failure for this document; cleared by a successful load.</summary>
     public string LoadError { get; private set; }
@@ -101,6 +110,7 @@ internal sealed class WorkspaceDocument
         {
             var package = loader(FilePath, IsJson) ?? throw new InvalidDataException("解析器没有返回包模型。");
             Package = package;
+            History = new PackageEditHistory(package);
             ModelVersion++;
             LoadError = null;
             ApplyPackageName(package);
@@ -117,19 +127,28 @@ internal sealed class WorkspaceDocument
     public void ReplacePackage(Package package)
     {
         Package = package ?? throw new ArgumentNullException(nameof(package));
+        History = new PackageEditHistory(package);
         ModelVersion++;
         IsDirty = false;
         LoadError = null;
         ApplyPackageName(package);
     }
 
-    public void MarkDirty() => IsDirty = true;
+    public void MarkDirty()
+    {
+        History?.Commit("编辑文档");
+        IsDirty = History?.IsDirty ?? true;
+    }
+
+    public void SyncHistoryState() => IsDirty = History?.IsDirty ?? false;
+    public void ReleaseEditorHistory() => History = null;
 
     public void MarkSaved(string path, bool isJson)
     {
         FilePath = System.IO.Path.GetFullPath(path);
         IsJson = isJson;
         IsDirty = false;
+        History?.MarkSaved();
         CaptionName = DeriveCaptionName(FilePath);
     }
 
@@ -138,6 +157,7 @@ internal sealed class WorkspaceDocument
     {
         if (IsDirty) return false;
         Package = null;
+        History = null;
         LoadError = null;
         ModelVersion++;
         return true;

@@ -90,7 +90,7 @@ public abstract class ObjectViewWrapper<TObject> where TObject : class, IObject<
 	public Vector3 Pivot
 	{
 		get => WrappedObject.Data.Pivot;
-		set => WrappedObject.Data.Pivot = value;
+		set => ObjectPropertyEditing.SetPivot(WrappedObject, value);
 	}
 
 	[Category("Data")]
@@ -107,7 +107,7 @@ public abstract class ObjectViewWrapper<TObject> where TObject : class, IObject<
 	public Quaternion Rotation
 	{
 		get => WrappedObject.Data.Rotation;
-		set => WrappedObject.Data.Rotation = value;
+		set => ObjectPropertyEditing.SetRotation(WrappedObject, value);
 	}
 
 	[Category("Data")]
@@ -115,7 +115,7 @@ public abstract class ObjectViewWrapper<TObject> where TObject : class, IObject<
 	public Vector3 Size
 	{
 		get => WrappedObject.Data.Size;
-		set => WrappedObject.Data.Size = value;
+		set => ObjectPropertyEditing.SetSize(WrappedObject, value);
 	}
 
 	#endregion

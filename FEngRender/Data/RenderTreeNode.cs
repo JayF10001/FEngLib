@@ -19,6 +19,9 @@ public abstract class RenderTreeNode
     public Color4 BlendedColor { get; protected set; }
 
     public Quaternion ObjectRotation { get; protected set; }
+    public string PoseError { get; protected set; }
+    public Matrix4x4 ParentTransform { get; protected set; } = Matrix4x4.Identity;
+    public virtual ObjectData EvaluatedData => GetObject().Data;
 
     /// <summary>
     /// Updates the state of the render node.
@@ -46,8 +49,7 @@ public abstract class RenderTreeNode
 
     public virtual Rectangle? Get2DExtents()
     {
-        // TODO
-        return Rectangle.Empty;
+        return Rectangle.Ceiling(RenderGeometry.Bounds(this));
         //switch (FrontendObject.Type)
         //{
         //    case ObjectType.Image:
@@ -107,12 +109,25 @@ public abstract class RenderTreeNode<TObject, TScript, TScriptTracks> : RenderTr
     public Quaternion Rotation { get; private set; }
     public Vector3 Pivot { get; private set; }
     public Color4 Color { get; private set; }
+    public override ObjectData EvaluatedData => new()
+    { Position = Position, Size = Size, Rotation = Rotation, Pivot = Pivot, Color = Color };
 
     public override void Update(RenderContext context, int deltaMs)
     {
         LoadProperties();
+        PoseError = null;
+        if (context.Layout)
+        {
+            var selected = ReferenceEquals(context.PreviewObject, FrontendObject) && context.PreviewScript.HasValue;
+            var script = FrontendObject.FindScript(selected ? context.PreviewScript.Value : 0x1744B3);
+            CurrentScriptTime = selected ? context.Time : 0;
+            if (script != null)
+                try { ApplyScript(script, script.Tracks); }
+                catch (Exception e) when (e is InvalidOperationException or ArgumentException or NullReferenceException)
+                { PoseError = e.Message; LoadProperties(); }
+        }
 
-        if (CurrentScript is { } currentScript
+        if (!context.Layout && CurrentScript is { } currentScript
             && CurrentScriptTime >= 0)
         {
             ApplyScript(currentScript, currentScript.Tracks);
@@ -163,6 +178,7 @@ public abstract class RenderTreeNode<TObject, TScript, TScriptTracks> : RenderTr
 
         outMatrix *= transMatrix;
         outMatrix *= context.ViewMatrix;
+        ParentTransform = context.ViewMatrix;
 
         ObjectRotation = Rotation;
         Transform = outMatrix;

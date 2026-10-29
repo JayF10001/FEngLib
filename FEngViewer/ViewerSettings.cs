@@ -12,6 +12,8 @@ internal sealed class ViewerLayoutState
     public bool RightCollapsed { get; set; }
     public string PreviewAspect { get; set; } = "4:3";
     public string LeftMode { get; set; } = "tree";
+    public bool SimpleTree { get; set; } = true;
+    public bool DarkTheme { get; set; }
 
     public ViewerLayoutState Clone() => new()
     {
@@ -20,6 +22,7 @@ internal sealed class ViewerLayoutState
         RightCollapsed = RightCollapsed,
         PreviewAspect = PreviewAspect,
         LeftMode = LeftMode
+        ,SimpleTree = SimpleTree, DarkTheme = DarkTheme
     };
 }
 

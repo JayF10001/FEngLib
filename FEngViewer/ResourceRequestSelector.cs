@@ -54,6 +54,7 @@ public class ResourceRequestEditor : UITypeEditor
         }
 
         // show this model stuff
+        EditorTheme.Apply(lb);
         _editorService.DropDownControl(lb);
         if (lb.SelectedItem == null) // no selection, return the passed-in value as is
             return value;

@@ -12,6 +12,8 @@ namespace FEngViewer;
 public partial class GLRenderControl : UserControl, IRenderControl
 {
     private GLRenderTreeRenderer _renderer;
+    private RenderTreeNode _selectedNode;
+    private bool _frameQueued;
 
     [CanBeNull] private RenderTree _renderTree;
     private PreviewAspectRatio _previewAspect = PreviewAspectRatio.Standard4x3;
@@ -25,6 +27,8 @@ public partial class GLRenderControl : UserControl, IRenderControl
         openglControl1.Margin = Padding.Empty;
         Resize += (_, _) => UpdatePreviewViewport();
         UpdatePreviewViewport();
+        InitializeEditorInput();
+        openglControl1.GDIDraw += (_, args) => DrawEditorOverlay(args.Graphics);
     }
 
     /// <summary>Raised when the letterbox rectangle changes, so the status strip can show the scale.</summary>
@@ -47,7 +51,9 @@ public partial class GLRenderControl : UserControl, IRenderControl
     }
 
     /// <summary>Maps a control-space point into the logical 640x480 HUD space.</summary>
-    public PointF ScreenToLogical(Point point) => PreviewLayout.ScreenToLogical(point, _previewViewport, _previewAspect);
+    public PointF ScreenToLogical(Point point) => new(
+        (point.X-_previewViewport.Left-_previewViewport.Width/2f-_pan.X)/Zoom+320,
+        (point.Y-_previewViewport.Top-_previewViewport.Height/2f-_pan.Y)/Zoom+240);
 
     public Color4 BackgroundColor
     {
@@ -56,8 +62,13 @@ public partial class GLRenderControl : UserControl, IRenderControl
 
     public RenderTreeNode SelectedNode
     {
-        get => _renderer?.SelectedNode;
-        set { if (_renderer != null) _renderer.SelectedNode = value; }
+        get => _selectedNode;
+        set
+        {
+            if (ReferenceEquals(_selectedNode, value)) return;
+            _selectedNode = value;
+            RequestFrame();
+        }
     }
 
     public void Init(string textureDir)
@@ -67,7 +78,25 @@ public partial class GLRenderControl : UserControl, IRenderControl
 
     public void Render(RenderTree renderTree)
     {
+        if (!ReferenceEquals(_renderTree, renderTree))
+        {
+            HoveredNode = null;
+            _lastHits.Clear();
+        }
         _renderTree = renderTree;
+        RequestFrame();
+    }
+
+    private void RequestFrame()
+    {
+        if (_frameQueued || !IsHandleCreated || IsDisposed) return;
+        _frameQueued = true;
+        BeginInvoke(new Action(() =>
+        {
+            _frameQueued = false;
+            if (!IsDisposed && !openglControl1.IsDisposed && _renderer != null)
+                openglControl1.DoRender();
+        }));
     }
 
     private void UpdatePreviewViewport()
@@ -96,6 +125,7 @@ public partial class GLRenderControl : UserControl, IRenderControl
         }
 
         ApplyViewport(gl);
+        UpdatePreviewFrame();
         if (_renderTree != null)
             _renderer.Render(_renderTree);
         else
@@ -117,7 +147,9 @@ public partial class GLRenderControl : UserControl, IRenderControl
 
         gl.MatrixMode(MatrixMode.Projection);
         gl.LoadIdentity();
-        gl.Scale(PreviewLayout.LogicalWidth / PreviewLayout.CanvasSize(_previewAspect).Width, 1f, 1f);
+        var fitScale=Math.Max(0.001f,viewport.Height/480f);
+        gl.Translate(2f*_pan.X/viewport.Width,-2f*_pan.Y/viewport.Height,0);
+        gl.Scale(PreviewLayout.LogicalWidth / PreviewLayout.CanvasSize(_previewAspect).Width*Zoom/fitScale, Zoom/fitScale, 1f);
         gl.Viewport(viewport.X, height - (viewport.Y + viewport.Height),
             Math.Max(1, viewport.Width), Math.Max(1, viewport.Height));
         gl.MatrixMode(MatrixMode.Modelview);
