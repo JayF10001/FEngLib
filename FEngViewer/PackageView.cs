@@ -63,6 +63,7 @@ public partial class PackageView : Form
 		imageList.Images.Add("TreeItem_GenericObject", Resources.TreeItem_GenericObject);
 		treeView1.ImageList = imageList;
 		InitializeEditorWorkbench();
+		WindowState = FormWindowState.Maximized;
 	}
 
 	private void PackageView_Load(object sender, EventArgs e)
