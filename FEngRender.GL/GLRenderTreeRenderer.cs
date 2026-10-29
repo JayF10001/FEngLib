@@ -40,6 +40,7 @@ public class GLRenderTreeRenderer
     public IObject<ObjectData> PreviewObject { get; set; }
     public uint? PreviewScript { get; set; }
     public int PreviewTime { get; set; }
+    public IReadOnlyDictionary<IObject<ObjectData>,ScriptPreviewFrame> PreviewFrames { get; set; }
 
     public void PrepareRender()
     {
@@ -78,7 +79,7 @@ public class GLRenderTreeRenderer
         _gl.LoadIdentity();
 
         var dt = (int)(_stopwatch.ElapsedMilliseconds - _lastRenderTime);
-        RenderGeometry.Prepare(tree, PreviewObject, PreviewScript, PreviewTime);
+        RenderGeometry.Prepare(tree, PreviewObject, PreviewScript, PreviewTime, PreviewFrames);
         RenderTree(tree);
         // _stopwatch.Restart();
 

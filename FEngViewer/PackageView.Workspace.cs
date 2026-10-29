@@ -566,6 +566,7 @@ public partial class PackageView
             RestoreTreeSelection(document.SelectedTreeKey);
             RestoreTreeView();
             Render();
+            if(_leftMode==WorkspaceLeftMode.Files)viewOutput.StartPackagePreview(document.Package);
             RememberRecentDocument(document);
         }
         catch (Exception error)
@@ -691,6 +692,17 @@ public partial class PackageView
         {
             _packageViewExtensions.SearchText = TxtSearch.Text;
             _packageViewExtensions.SearchIndex = _workspace.Active?.SearchIndex ?? -1;
+        }
+        UpdatePackagePreviewControls();
+        if(previous!=mode && _currentPackage!=null)
+        {
+            if(files)viewOutput.StartPackagePreview(_currentPackage);
+            else
+            {
+                viewOutput.ResetPreview();
+                viewOutput.SelectedNode=FindTreeOwner(treeView1.SelectedNode);
+                _inspector?.RefreshGeometry();
+            }
         }
     }
 
@@ -947,7 +959,11 @@ public partial class PackageView
         // change the navigation view, without rebuilding its object tree or textures.
         var existing = _workspace.FindDocument(file.Path);
         if (existing != null && ReferenceEquals(existing, _workspace.Active) && ReferenceEquals(existing, _boundDocument))
+        {
+            if(_leftMode==WorkspaceLeftMode.Files && !viewOutput.PackagePreviewActive)
+                viewOutput.StartPackagePreview(existing.Package);
             return true;
+        }
         var document = _workspace.OpenFile(file);
         SetFormDetails();
         return document != null && ReferenceEquals(_boundDocument, document);

@@ -101,6 +101,7 @@ internal static class WorkbenchTests
             Check(Write(roundtrip).SequenceEqual(original),"Undo to original lost binary source encoding.");
             var other=new PackageEditHistory(new Package{Name="Other",Filename="o"});Check(!other.CanUndo && !other.IsDirty,"Document histories share state.");
             File.WriteAllBytes(Path.Combine(directory,"six-object-types.feng"),bytes);
+            checks+=AnimationPreviewTests.Run();
             Console.WriteLine($"Workbench tests passed: {checks}");return 0;
         }
         catch(Exception error){Console.Error.WriteLine(error);return 1;}

@@ -20,14 +20,15 @@ public static class RenderGeometry
             m.M41+z*m.M31,m.M42+z*m.M32,0,1);
         return Matrix4x4.Invert(planar,out inverse);
     }
-    public static void Prepare(RenderTree tree, IObject<ObjectData> preview = null, uint? script = null, int time = 0)
+    public static void Prepare(RenderTree tree, IObject<ObjectData> preview = null, uint? script = null, int time = 0,
+        IReadOnlyDictionary<IObject<ObjectData>,ScriptPreviewFrame> previewFrames = null)
     {
         if (tree == null) return;
         void Walk(IEnumerable<RenderTreeNode> nodes, Matrix4x4 parent, RenderTreeNode parentNode)
         {
             foreach (var node in nodes)
             {
-                node.Update(new RenderContext(parent, parentNode, true, preview, script, time), 0);
+                node.Update(new RenderContext(parent, parentNode, true, preview, script, time, previewFrames), 0);
                 if (node is RenderTreeGroup group) Walk(group, node.Transform, node);
             }
         }

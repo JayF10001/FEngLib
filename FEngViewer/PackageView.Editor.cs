@@ -21,6 +21,9 @@ public partial class PackageView
     private ToolStripComboBox _zoomChoice;
     private bool _syncingZoom;
     private readonly List<ToolStripButton> _toolButtons=new();
+    private ToolStripButton _packagePlayButton,_packagePauseButton,_packageResetButton;
+    private ToolStripSeparator _editorToolSeparator;
+    private readonly List<ToolStripItem> _packagePreviewTools=new();
 
     private void InitializeEditorWorkbench()
     {
@@ -78,6 +81,7 @@ public partial class PackageView
             if(_zoomChoice==null || _zoomChoice.ComboBox.ContainsFocus)return;
             _syncingZoom=true;_zoomChoice.Text=viewOutput.Fit?"适应":$"{viewOutput.Zoom*100:0}%";_syncingZoom=false;
         };
+        viewOutput.PreviewStateChanged+=UpdatePackagePreviewControls;
         _workspace.StateChanged+=(_,_)=>UpdateHistoryButtons();
         _workspace.ActiveChanged+=(_,_)=>UpdateHistoryButtons();
         _workspace.Saving+=(_,_)=>{ValidateChildren();viewOutput.CancelInteraction();};
@@ -127,12 +131,19 @@ public partial class PackageView
         _canvasTools=new ToolStrip{Dock=DockStyle.Top,GripStyle=ToolStripGripStyle.Hidden,AutoSize=true,
             CanOverflow=false,LayoutStyle=ToolStripLayoutStyle.Flow,Padding=new Padding(4,3,4,3)};
         ((FlowLayoutSettings)_canvasTools.LayoutSettings).WrapContents=true;
+        _packagePlayButton=new ToolStripButton("全体预览 30 秒",null,(_,_)=>viewOutput.StartPackagePreview(_currentPackage));
+        _packagePauseButton=new ToolStripButton("暂停",null,(_,_)=>
+        {if(viewOutput.PreviewPlaying)viewOutput.PausePreview();else viewOutput.ResumePreview();});
+        _packageResetButton=new ToolStripButton("初始布局",null,(_,_)=>viewOutput.ResetPreview());
+        _packagePreviewTools.AddRange(new ToolStripItem[]{_packagePlayButton,_packagePauseButton,_packageResetButton,new ToolStripSeparator()});
+        _canvasTools.Items.AddRange(_packagePreviewTools.ToArray());
         foreach(var pair in new[]{("选择",CanvasTool.Select),("移动",CanvasTool.Move),("缩放",CanvasTool.Scale),("旋转",CanvasTool.Rotate),("平移",CanvasTool.Pan)})
         {
             var tool=pair.Item2;var b=new ToolStripButton(pair.Item1){Tag=tool,Checked=tool==viewOutput.Tool};
             b.Click+=(_,_)=>SetCanvasTool(tool);_toolButtons.Add(b);_canvasTools.Items.Add(b);
         }
-        _canvasTools.Items.Add(new ToolStripSeparator());
+        _editorToolSeparator=new ToolStripSeparator();
+        _canvasTools.Items.Add(_editorToolSeparator);
         _canvasTools.Items.Add("适应",null,(_,_)=>viewOutput.FitToWindow());
         _canvasTools.Items.Add("100%",null,(_,_)=>viewOutput.SetZoom(1));
         var zoom=new ToolStripComboBox{Width=78,AutoSize=false};_zoomChoice=zoom;
@@ -149,6 +160,21 @@ public partial class PackageView
             _canvasTools.Items.Add(b);
         }
         _innerSplit.Panel1.Controls.Add(_canvasTools);_canvasTools.SendToBack();
+        UpdatePackagePreviewControls();
+    }
+    private void UpdatePackagePreviewControls()
+    {
+        if(_packagePlayButton==null)return;
+        var files=_leftMode==WorkspaceLeftMode.Files;
+        foreach(var item in _packagePreviewTools)item.Visible=files;
+        foreach(var item in _toolButtons)item.Visible=!files;
+        if(_editorToolSeparator!=null)_editorToolSeparator.Visible=!files;
+        _packagePlayButton.Text=viewOutput.PackagePreviewActive?"重新预览 30 秒":"全体预览 30 秒";
+        _packagePlayButton.Enabled=_currentPackage!=null;
+        _packagePauseButton.Enabled=viewOutput.PackagePreviewActive;
+        _packagePauseButton.Text=viewOutput.PreviewPlaying?"暂停":"继续";
+        _packageResetButton.Enabled=viewOutput.PackagePreviewActive;
+        _packagePlayButton.ToolTipText="每个对象播放一个展示型脚本；隐藏、离场等脚本不自动播放。";
     }
     private void SetCanvasTool(CanvasTool tool)
     {viewOutput.CancelInteraction();viewOutput.ResetPreview();viewOutput.Tool=tool;foreach(var b in _toolButtons)b.Checked=Equals(b.Tag,tool);}
@@ -196,6 +222,7 @@ public partial class PackageView
         if(_undoItem==null)return;
         var h=ActiveDocument?.History;
         if(_canvasTools!=null)_canvasTools.Enabled=ActiveDocument?.Package!=null;
+        UpdatePackagePreviewControls();
         _undoItem.Enabled=h?.CanUndo==true;_redoItem.Enabled=h?.CanRedo==true;
         _undoItem.Text="撤销"+(h?.CanUndo==true?" · "+h.UndoLabel:"");
         _redoItem.Text="重做"+(h?.CanRedo==true?" · "+h.RedoLabel:"");

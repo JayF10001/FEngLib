@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Numerics;
 using FEngLib.Packages;
 
 namespace FEngLib.Editing;
@@ -78,8 +79,18 @@ public sealed class PackageEditHistory
         public bool SameAs(GraphState other) => members.Count == other.members.Count &&
             sequences.Count == other.sequences.Count && members.Zip(other.members).All(pair =>
                 ReferenceEquals(pair.First.Owner, pair.Second.Owner) && pair.First.Property == pair.Second.Property &&
-                Equals(pair.First.Value, pair.Second.Value)) && sequences.Zip(other.sequences).All(pair =>
+                SameValue(pair.First.Value, pair.Second.Value)) && sequences.Zip(other.sequences).All(pair =>
                 ReferenceEquals(pair.First.Owner, pair.Second.Owner) && pair.First.Items.SequenceEqual(pair.Second.Items));
+        // Vector.Equals uses floating-point ==, so an unchanged NaN in an unsupported source
+        // track otherwise looks like a new edit on every comparison. Compare components using
+        // float.Equals, which treats the same non-finite source value as unchanged.
+        private static bool SameValue(object a, object b) => (a,b) switch
+        {
+            (Vector2 x,Vector2 y)=>x.X.Equals(y.X)&&x.Y.Equals(y.Y),
+            (Vector3 x,Vector3 y)=>x.X.Equals(y.X)&&x.Y.Equals(y.Y)&&x.Z.Equals(y.Z),
+            (Quaternion x,Quaternion y)=>x.X.Equals(y.X)&&x.Y.Equals(y.Y)&&x.Z.Equals(y.Z)&&x.W.Equals(y.W),
+            _=>Equals(a,b)
+        };
         public void Restore()
         {
             foreach (var member in members) member.Property.SetValue(member.Owner, member.Value);

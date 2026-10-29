@@ -119,8 +119,10 @@ public abstract class RenderTreeNode<TObject, TScript, TScriptTracks> : RenderTr
         if (context.Layout)
         {
             var selected = ReferenceEquals(context.PreviewObject, FrontendObject) && context.PreviewScript.HasValue;
-            var script = FrontendObject.FindScript(selected ? context.PreviewScript.Value : 0x1744B3);
-            CurrentScriptTime = selected ? context.Time : 0;
+            var frame = new ScriptPreviewFrame(selected ? context.PreviewScript.Value : 0x1744B3, selected ? context.Time : 0);
+            if(context.PreviewFrames!=null && context.PreviewFrames.TryGetValue(FrontendObject,out var shared))frame=shared;
+            var script = FrontendObject.FindScript(frame.ScriptId);
+            CurrentScriptTime = frame.Time;
             if (script != null)
                 try { ApplyScript(script, script.Tracks); }
                 catch (Exception e) when (e is InvalidOperationException or ArgumentException or NullReferenceException)

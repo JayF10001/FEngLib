@@ -7,6 +7,7 @@ using System.Linq;
 using System.Numerics;
 using System.Windows.Forms;
 using FEngLib.Objects;
+using FEngLib.Packages;
 using FEngRender.Data;
 
 namespace FEngViewer;
@@ -31,6 +32,7 @@ public partial class GLRenderControl
     private int _pausedTime;
     private IObject<ObjectData> _previewObject;
     private uint? _previewScript;
+    private PackageAnimationPreview _packagePreview;
     private List<RenderTreeNode> _lastHits = new();
     private Point _lastHitPoint;
     private int _hitIndex;
@@ -50,11 +52,14 @@ public partial class GLRenderControl
     public PointF Pan => _pan;
     public bool Fit => _fit;
     public bool PreviewPlaying => _previewClock.IsRunning;
+    public bool PackagePreviewActive => _packagePreview!=null;
+    public int PackagePreviewObjectCount => _packagePreview?.ObjectCount??0;
     public bool IsPreviewOf(IObject<ObjectData> obj,uint id)=>ReferenceEquals(_previewObject,obj)&&_previewScript==id;
     public event Action<RenderTreeNode> ObjectPicked;
     public event Action<IObject<ObjectData>, bool> TransformFinished;
     public event Action TransformUpdated;
     public event Action<string> EditorStatus;
+    public event Action PreviewStateChanged;
 
     public void SetView(float zoom, PointF pan, bool fit)
     { _fit = fit; _zoom = Math.Clamp(zoom, 0.1f, 8f); _pan = pan; PreviewViewportChanged?.Invoke(this, EventArgs.Empty); RequestFrame(); }
@@ -75,14 +80,30 @@ public partial class GLRenderControl
     public PointF FeToScreen(PointF p) => LogicalToScreen(new PointF(p.X+320,p.Y+240));
     public PointF ScreenToFe(Point p) { var v=ScreenToLogical(p); return new PointF(v.X-320,v.Y-240); }
     public void StartPreview(IObject<ObjectData> obj, uint id)
-    { CancelInteraction(); _previewObject=obj; _previewScript=id; _pausedTime=0; _previewClock.Restart(); }
+    { CancelInteraction(); _packagePreview=null; _previewObject=obj; _previewScript=id; _pausedTime=0; _previewClock.Restart(); PreviewStateChanged?.Invoke(); }
+    public void StartPackagePreview(Package package)
+    {
+        CancelInteraction();ResetPreview();
+        if(package==null)return;
+        var preview=new PackageAnimationPreview(package);
+        SelectedNode=null;
+        if(preview.ObjectCount==0)
+        {EditorStatus?.Invoke("当前 FNG 没有可自动播放的展示动画，保持初始布局。");return;}
+        _packagePreview=preview;_previewClock.Restart();
+        EditorStatus?.Invoke($"全体动画预览：{preview.ObjectCount} 个对象，30 秒后回到初始布局。");
+        PreviewStateChanged?.Invoke();RequestFrame();
+    }
     public void PausePreview()
-    { if (_previewClock.IsRunning) { _pausedTime+=(int)_previewClock.ElapsedMilliseconds; _previewClock.Reset(); } }
-    public void ResumePreview() { if (_previewScript.HasValue && !_previewClock.IsRunning) _previewClock.Start(); }
+    { if (_previewClock.IsRunning) { _pausedTime+=(int)_previewClock.ElapsedMilliseconds; _previewClock.Reset(); PreviewStateChanged?.Invoke(); } }
+    public void ResumePreview()
+    { if ((_previewScript.HasValue || _packagePreview!=null) && !_previewClock.IsRunning) {_previewClock.Start();PreviewStateChanged?.Invoke();} }
     public void ResetPreview()
     {
-        _previewClock.Reset(); _pausedTime=0; _previewObject=null; _previewScript=null;
+        var hadPreview=_packagePreview!=null || _previewScript.HasValue;
+        _previewClock.Reset(); _pausedTime=0; _previewObject=null; _previewScript=null; _packagePreview=null;
+        if(_renderer!=null){_renderer.PreviewFrames=null;_renderer.PreviewObject=null;_renderer.PreviewScript=null;}
         PrepareLayout();
+        if(hadPreview)PreviewStateChanged?.Invoke();
     }
     public void PrepareLayout() { RenderGeometry.Prepare(_renderTree); RequestFrame(); }
 
@@ -183,6 +204,13 @@ public partial class GLRenderControl
         { _panning=true; _mouseStart=e.Location; _panStart=_pan; HoveredNode=null; openglControl1.Cursor=Cursors.Hand; openglControl1.Capture=true; return; }
         if(e.Button!=MouseButtons.Left || _renderTree==null || !PreviewViewport.Contains(e.Location)) return;
         HoveredNode=null;
+        if(PackagePreviewActive)
+        {
+            // Select the layer at its displayed animated location before returning to INIT.
+            // The first click enters editing; a following drag starts from the stable layout.
+            var animatedHit=HitObjects(e.Location).FirstOrDefault();
+            ResetPreview();SelectedNode=animatedHit;ObjectPicked?.Invoke(animatedHit);return;
+        }
         ResetPreview();
         var handle=HitHandle(e.Location);
         var fe=ScreenToFe(e.Location);
@@ -379,8 +407,18 @@ public partial class GLRenderControl
     private void UpdatePreviewFrame()
     {
         if(_renderer==null) return;
+        var elapsed=_pausedTime+(int)_previewClock.ElapsedMilliseconds;
+        if(_packagePreview!=null)
+        {
+            if(elapsed>=PackageAnimationPreview.DurationMilliseconds)
+            {ResetPreview();EditorStatus?.Invoke("全体动画预览结束，已回到初始布局。可点击“全体预览”再次播放。");return;}
+            _renderer.PreviewObject=null;_renderer.PreviewScript=null;
+            _renderer.PreviewFrames=_packagePreview.Sample(elapsed);
+            return;
+        }
+        _renderer.PreviewFrames=null;
         _renderer.PreviewObject=_previewObject; _renderer.PreviewScript=_previewScript;
-        var t=_pausedTime+(int)_previewClock.ElapsedMilliseconds;
+        var t=elapsed;
         var script=_previewObject?.GetScripts().FirstOrDefault(s=>s.Id==_previewScript);
         var visited=new Dictionary<uint,int>();
         for(var hops=0;script!=null && hops<256;hops++)
