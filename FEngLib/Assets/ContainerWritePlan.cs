@@ -54,6 +54,7 @@ public sealed class ContainerWritePlan
     public Dictionary<string, string> ExpectedFngs { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public List<string> ExpectedOtherResources { get; set; } = new();
     public bool PreserveJdlz { get; set; }
+    public bool PublishNewCopy { get; internal set; }
 
     public bool IsExecutable => Blockers.Count == 0 && Items.Count > 0 && Items.All(i => i.IsRunnable);
     public bool HasPendingChanges => PendingChangeCount > 0;
@@ -63,7 +64,9 @@ public sealed class ContainerWritePlan
 /// <summary>Reconciles unfinished operations, then builds and validates a write-back plan.</summary>
 public static class ContainerWritePlanner
 {
-    public static ContainerWritePlan Build(ContainerSession session)
+    public static ContainerWritePlan Build(ContainerSession session) => Build(session, publishNewCopy: false);
+
+    internal static ContainerWritePlan Build(ContainerSession session, bool publishNewCopy)
     {
         if (session == null) throw new ArgumentNullException(nameof(session));
         var plan = new ContainerWritePlan
@@ -72,21 +75,28 @@ public static class ContainerWritePlanner
             OriginalPath = session.OriginalPath,
             WorkingCopyPath = session.WorkingCopyPath,
             WorkingCopyLength = session.WorkingCopyLength,
-            WorkingCopySha256 = session.WorkingCopySha256
+            WorkingCopySha256 = session.WorkingCopySha256,
+            PublishNewCopy = publishNewCopy
         };
 
-        foreach (var line in WriteBackJournal.Recover(session))
-            plan.Notes.Add(line);
-        session.RecoverSaves();
-        plan.Blockers.AddRange(session.SaveRecoveryProblems);
-        plan.PendingChangeCount = session.Bindings.Count(b => b.HasSavedChange);
-
-        if (WriteBackJournal.Load(session.SessionDirectory)
-                .Any(e => e.Status is WriteBackJournal.StatusPrepared or WriteBackJournal.StatusPublished))
+        if (!publishNewCopy)
         {
-            plan.Blockers.Add("存在未完成的写回日志，需要人工核对后才能再次写回。" +
-                $"日志: {WriteBackJournal.JournalFilePath(session.SessionDirectory)}");
-            return plan;
+            foreach (var line in WriteBackJournal.Recover(session)) plan.Notes.Add(line);
+            session.RecoverSaves();
+            plan.Blockers.AddRange(session.SaveRecoveryProblems);
+            plan.PendingChangeCount = session.Bindings.Count(b => b.HasSavedChange);
+            if (WriteBackJournal.Load(session.SessionDirectory)
+                    .Any(e => e.Status is WriteBackJournal.StatusPrepared or WriteBackJournal.StatusPublished))
+            {
+                plan.Blockers.Add("存在未完成的写回日志，需要人工核对后才能再次写回。" +
+                    $"日志: {WriteBackJournal.JournalFilePath(session.SessionDirectory)}");
+                return plan;
+            }
+        }
+        else
+        {
+            plan.PendingChangeCount = session.Bindings.Count(b => b.HasSavedChange);
+            if (!plan.HasPendingChanges) return plan;
         }
 
         if (session.WorkingCopyPath == null)
@@ -95,13 +105,19 @@ public static class ContainerWritePlanner
                 "请先创建工作副本（Viewer 中首次写回时会提示选择路径）。");
             return plan;
         }
-        if (!File.Exists(session.WorkingCopyPath))
+        if (!publishNewCopy && !File.Exists(session.WorkingCopyPath))
         {
             plan.Blockers.Add($"工作副本不存在: {session.WorkingCopyPath}");
             return plan;
         }
         if (ContainerSession.PathsEqual(session.WorkingCopyPath, session.OriginalPath))
             plan.Blockers.Add("工作副本不能指向原始容器。");
+        if (publishNewCopy && (File.Exists(session.WorkingCopyPath) || Directory.Exists(session.WorkingCopyPath)))
+            plan.Blockers.Add("输出位置已存在，请选择新文件。");
+
+        var baseline = publishNewCopy ? session.OriginalPath : session.WorkingCopyPath;
+        var backup = publishNewCopy ? Path.Combine(session.SessionDirectory, "source.bak") :
+            PlanBackupPath(session, session.WorkingCopyPath);
 
         try
         {
@@ -116,7 +132,7 @@ public static class ContainerWritePlanner
         ContainerBlockIndex index;
         try
         {
-            var container = FngContainer.Open(session.WorkingCopyPath);
+            var container = FngContainer.Open(baseline);
             if (container.RequiresRebuild || session.RebuiltWithBinary || session.Bindings.Any(b =>
                     b.HasSavedChange && File.Exists(b.EffectiveFile) && new FileInfo(b.EffectiveFile).Length != b.StoredLength))
             {
@@ -132,19 +148,19 @@ public static class ContainerWritePlanner
                 if (BinaryRuntime.DirectoryPath == null)
                     plan.Blockers.Add("请先在容器窗口配置 Binary 2.9 运行库目录。");
                 if (container.SourceLength > (1 << 26)) plan.Blockers.Add("Binary 重建暂支持不超过 64 MiB 的容器。");
-                plan.BackupPath = PlanBackupPath(session, session.WorkingCopyPath);
+                plan.BackupPath = backup;
                 foreach (var binding in session.Bindings.Where(b => b.HasSavedChange))
                     plan.Items.Add(BuildItem(session, binding, null, container));
                 foreach (var group in plan.Items.GroupBy(i => i.PackageName, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
                     foreach (var item in group) item.Blockers.Add("同一包名存在多个替换项，拒绝重建。");
                 if (plan.Blockers.Count != 0) return plan;
                 plan.ExpectedFngs = container.Entries.ToDictionary(e => e.Name, e => e.Sha256, StringComparer.OrdinalIgnoreCase);
-                plan.ExpectedOtherResources = BinaryRebuildValidation.OtherResources(session.WorkingCopyPath, out var jdlz);
+                plan.ExpectedOtherResources = BinaryRebuildValidation.OtherResources(baseline, out var jdlz);
                 plan.PreserveJdlz = jdlz;
                 plan.Notes.Add("使用 Binary/Nikki 重建容器；保留整文件 JDLZ，逐一核对所有 FNG 和其他资源，校验贴图像素及属性。");
                 return plan;
             }
-            index = ContainerBlockIndex.Scan(session.WorkingCopyPath);
+            index = ContainerBlockIndex.Scan(baseline);
         }
         catch (Exception error) when (error is IOException or InvalidDataException or
             UnauthorizedAccessException or NotSupportedException)
@@ -169,7 +185,7 @@ public static class ContainerWritePlanner
             return plan;
         }
 
-        plan.BackupPath = PlanBackupPath(session, session.WorkingCopyPath);
+        plan.BackupPath = backup;
         plan.ExpectedBlocks = index.Blocks.Select(b => new WriteBackPlanBlock
         {
             Sequence = b.Sequence,
@@ -259,8 +275,9 @@ public static class ContainerWritePlanner
         {
             var matches = rebuilt.Entries.Where(e => string.Equals(e.Name, binding.PackageName, StringComparison.OrdinalIgnoreCase)).ToArray();
             var current = matches.FirstOrDefault();
-            if (matches.Length != 1 || current.Sha256 != binding.WriteBackTargetSha256)
-                item.Blockers.Add("当前副本中的 FNG 与初始提取或上次写回不一致，拒绝按包名替换。");
+            if (matches.Length != 1 || current.Sha256 != binding.WriteBackTargetSha256 ||
+                !session.RebuiltWithBinary && current.Offset != binding.BlockOffset)
+                item.Blockers.Add("当前 FNG 的块偏移或摘要与记录不一致，拒绝替换。");
             else item.CurrentBlockSha256 = current.Sha256;
             return item;
         }

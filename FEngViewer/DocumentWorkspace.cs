@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using FEngLib.Assets;
 using FEngLib.Packages;
 
 namespace FEngViewer;
@@ -23,6 +24,8 @@ internal interface IWorkspacePrompts
 
     /// <summary>Asks for a Save As target; returns null when the user cancels.</summary>
     string ChooseSaveTarget(WorkspaceDocument document, out bool isJson);
+
+    bool SaveContainerProject(bool chooseTarget);
 
     SavePromptResult AskToSave(WorkspaceDocument document, string reason);
 
@@ -53,8 +56,19 @@ internal sealed class WorkspaceFile
         Caption = WorkspaceDocument.DeriveCaptionName(path);
     }
 
+    internal WorkspaceFile(ContainerProject project, ContainerBlock block)
+    {
+        Project = project;
+        Block = block;
+        Caption = block.PackageName ?? $"FNG 0x{block.Offset:X8}";
+    }
+
     public string Path { get; }
-    public string Caption { get; }
+    public ContainerProject Project { get; }
+    public ContainerBlock Block { get; }
+    public string Key => Project == null ? Path : $"{Project.Index.SourcePath}|{Block.Offset:X}";
+    public string Location => Project == null ? Path : $"{Project.Index.SourcePath} @ 0x{Block.Offset:X8}";
+    public string Caption { get; internal set; }
     public bool IsJson { get; }
     public bool IsMissing { get; internal set; }
 }
@@ -227,7 +241,7 @@ internal sealed class DocumentWorkspace
         {
             try
             {
-                document.ReplacePackage(_prompts.ReadPackage(document.FilePath, document.IsJson));
+                if (!TryReplaceModel(document, _prompts.ReadPackage(document.FilePath, document.IsJson))) return;
             }
             catch (Exception error)
             {
@@ -237,7 +251,6 @@ internal sealed class DocumentWorkspace
             }
 
             result.Refreshed++;
-            ActiveChanged?.Invoke(this, document);
             return;
         }
 
@@ -248,21 +261,32 @@ internal sealed class DocumentWorkspace
     public WorkspaceDocument OpenFile(WorkspaceFile file, bool activate = true, bool reportError = true)
     {
         if (file == null) return null;
-        var document = FindDocument(file.Path);
-        if (document != null)
+        return OpenDocument(FindDocument(file.Path) ?? new WorkspaceDocument(file.Path, file.IsJson),
+            activate, reportError);
+    }
+
+    public WorkspaceDocument FindBlockDocument(WorkspaceFile file) =>
+        _documents.FirstOrDefault(d => ReferenceEquals(d.Project, file.Project) && ReferenceEquals(d.Block, file.Block));
+
+    internal WorkspaceDocument OpenDocument(WorkspaceDocument document, bool activate, bool reportError)
+    {
+        if (!document.IsLoaded && !TryLoad(document, reportError)) return null;
+        if (_documents.Contains(document))
         {
-            if (!document.IsLoaded && !TryLoad(document, reportError)) return null;
-            if (!_documents.Contains(document)) return null;
-            if (activate) CommitActive(document);
+            if (activate && !CommitActive(document)) return null;
             return document;
         }
 
-        var created = new WorkspaceDocument(file.Path, file.IsJson);
-        if (!TryLoad(created, reportError)) return null;
-        _documents.Add(created);
+        _documents.Add(document);
         StateChanged?.Invoke(this, EventArgs.Empty);
-        if (activate) CommitActive(created);
-        return created;
+        if (activate && !CommitActive(document))
+        {
+            _documents.Remove(document);
+            document.ReleaseEditorHistory();
+            Changed?.Invoke(this, EventArgs.Empty);
+            return null;
+        }
+        return document;
     }
 
     /// <summary>
@@ -274,9 +298,11 @@ internal sealed class DocumentWorkspace
         if (document == null || !_documents.Contains(document)) return false;
         if (ReferenceEquals(document, Active) && document.IsLoaded) return true;
         if (!document.IsLoaded && !TryLoad(document, reportError)) return false;
-        CommitActive(document);
-        return true;
+        return CommitActive(document);
     }
+
+    /// <summary>The global page has no active editing document; all open models stay owned here.</summary>
+    public bool ShowWorkspace() => Active == null || CommitActive(null);
 
     /// <summary>Opens the first file that parses; used after a batch import.</summary>
     public WorkspaceDocument OpenFirstAvailable(IEnumerable<WorkspaceFile> files, out int failed)
@@ -286,6 +312,7 @@ internal sealed class DocumentWorkspace
         foreach (var file in files ?? Enumerable.Empty<WorkspaceFile>())
         {
             var document = FindDocument(file.Path);
+            var created = document == null;
             if (document == null)
             {
                 document = new WorkspaceDocument(file.Path, file.IsJson);
@@ -306,18 +333,26 @@ internal sealed class DocumentWorkspace
                 continue;
             }
 
-            CommitActive(document);
-            return document;
+            if (CommitActive(document)) return document;
+            if (created)
+            {
+                _documents.Remove(document);
+                document.ReleaseEditorHistory();
+                Changed?.Invoke(this, EventArgs.Empty);
+            }
+            failed++;
         }
 
         if (errors.Count > 0) _prompts.ShowError("自动打开失败", JoinErrors(errors));
         return null;
     }
 
-    public bool Close(WorkspaceDocument document)
+    public bool Close(WorkspaceDocument document) => Close(document, discardChanges: false);
+
+    private bool Close(WorkspaceDocument document, bool discardChanges)
     {
         if (document == null || !_documents.Contains(document)) return false;
-        if (!ConfirmClose(document)) return false;
+        if (!discardChanges && !ConfirmClose(document)) return false;
 
         var index = _documents.IndexOf(document);
         var wasActive = ReferenceEquals(document, Active);
@@ -351,17 +386,18 @@ internal sealed class DocumentWorkspace
         return true;
     }
 
-    public bool CloseAll()
+    public bool CloseAll(bool discardChanges = false)
     {
+        var previous = Active;
         _closingAll = true;
         try
         {
             foreach (var document in _documents.ToArray())
             {
-                if (Close(document)) continue;
-                // Cancelled: keep everything still open, and re-bind the editor to a real document.
+                if (Close(document, discardChanges)) continue;
+                // Cancelled: preserve the global page, or rebind a remaining editing document.
                 Active = null;
-                var remaining = _documents.FirstOrDefault();
+                var remaining = previous == null ? null : _documents.Contains(previous) ? previous : _documents.FirstOrDefault();
                 if (remaining == null) ActiveChanged?.Invoke(this, null);
                 else if (!Activate(remaining, reportError: false)) ActiveChanged?.Invoke(this, null);
                 Changed?.Invoke(this, EventArgs.Empty);
@@ -387,6 +423,7 @@ internal sealed class DocumentWorkspace
             StatusMessage = "没有可保存的文档";
             return false;
         }
+        if (document.Project != null) return _prompts.SaveContainerProject(chooseTarget);
 
         var path = document.FilePath;
         var isJson = document.IsJson;
@@ -443,18 +480,16 @@ internal sealed class DocumentWorkspace
         Package package;
         try
         {
-            package = _prompts.ReadPackage(document.FilePath, document.IsJson) ??
-                      throw new InvalidDataException("解析器没有返回包模型。");
+            package = document.ReadPackage(_prompts.ReadPackage);
         }
         catch (Exception error)
         {
             document.RecordLoadFailure(error);
-            _prompts.ShowError("重新读取失败", $"{document.FilePath}\n\n{error.Message}\n\n已保留当前模型与未保存修改。");
+            _prompts.ShowError("重新读取失败", $"{document.Location}\n\n{error.Message}\n\n已保留当前模型与未保存修改。");
             return false;
         }
 
-        document.ReplacePackage(package);
-        if (ReferenceEquals(document, Active)) ActiveChanged?.Invoke(this, document);
+        if (!TryReplaceModel(document, package)) return false;
         StateChanged?.Invoke(this, EventArgs.Empty);
         StatusMessage = $"已重新读取 {document.CaptionName}";
         return true;
@@ -510,6 +545,28 @@ internal sealed class DocumentWorkspace
 
     public void NotifyStateChanged() => StateChanged?.Invoke(this, EventArgs.Empty);
 
+    private bool TryReplaceModel(WorkspaceDocument document, Package package)
+    {
+        var previous = document.CaptureModelState();
+        try
+        {
+            document.ReplacePackage(package);
+            if (ReferenceEquals(document, Active)) ActiveChanged?.Invoke(this, document);
+            return true;
+        }
+        catch (Exception error)
+        {
+            document.RestoreModelState(previous);
+            if (ReferenceEquals(document, Active))
+            {
+                try { ActiveChanged?.Invoke(this, document); }
+                catch (Exception) { /* Keep the original binding error. */ }
+            }
+            _prompts.ShowError("重新绑定失败", $"{document.Location}\n\n{error.Message}\n\n已保留原模型及未保存修改。");
+            return false;
+        }
+    }
+
     private bool TryLoad(WorkspaceDocument document, bool reportError)
     {
         try
@@ -521,12 +578,12 @@ internal sealed class DocumentWorkspace
         {
             document.RecordLoadFailure(error);
             if (reportError)
-                _prompts.ShowError("无法打开文档", $"{document.FilePath}\n\n{error.Message}");
+                _prompts.ShowError("无法打开文档", $"{document.Location}\n\n{error.Message}");
             return false;
         }
     }
 
-    private void CommitActive(WorkspaceDocument document)
+    private bool CommitActive(WorkspaceDocument document)
     {
         var previous = Active;
         Active = document;
@@ -537,19 +594,21 @@ internal sealed class DocumentWorkspace
         catch (Exception error)
         {
             Active = previous;
-            _prompts.ShowError("切换文档失败", $"{document.FilePath}\n\n{error.Message}");
+            _prompts.ShowError("切换页面失败", $"{document?.Location ?? "工作区"}\n\n{error.Message}");
             try { ActiveChanged?.Invoke(this, previous); }
             catch (Exception) { /* the editor is already unusable; keep the original error visible */ }
-            return;
+            return false;
         }
 
         StateChanged?.Invoke(this, EventArgs.Empty);
+        return true;
     }
 
     private bool ConfirmClose(WorkspaceDocument document)
     {
         if (!document.IsDirty) return true;
-        switch (_prompts.AskToSave(document, "关闭前是否保存对当前文档的修改？"))
+        var reason = document.Project == null ? "关闭前是否保存对当前文档的修改？" : "关闭标签前是否保存容器工程？";
+        switch (_prompts.AskToSave(document, reason))
         {
             case SavePromptResult.Cancel:
                 return false;

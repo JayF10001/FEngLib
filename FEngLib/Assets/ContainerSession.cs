@@ -81,6 +81,20 @@ public sealed class ContainerSession
     [JsonIgnore] public string SessionDirectory { get; private set; }
     [JsonIgnore] public IReadOnlyList<string> SaveRecoveryProblems { get; private set; } = Array.Empty<string>();
 
+    internal static ContainerSession ForNewCopy(ContainerBlockIndex index, string directory, string output,
+        string originalPath = null)
+        => new()
+        {
+            ContainerId = $"{Path.GetFileNameWithoutExtension(index.SourcePath)}-{index.SourceSha256[..12]}",
+            OriginalPath = string.IsNullOrWhiteSpace(originalPath) ? index.SourcePath : Path.GetFullPath(originalPath),
+            OriginalLength = index.SourceLength,
+            OriginalSha256 = index.SourceSha256,
+            WorkingCopyPath = output,
+            WorkingCopyLength = index.SourceLength,
+            WorkingCopySha256 = index.SourceSha256,
+            SessionDirectory = directory
+        };
+
     public void RecoverSaves() => SaveRecoveryProblems = ContainerSaveReceipt.Recover(this);
 
     public static string SessionFilePath(string extractionDirectory)

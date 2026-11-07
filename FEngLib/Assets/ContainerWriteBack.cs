@@ -108,7 +108,10 @@ public static class ContainerWriteBackExecutor
         progress?.Invoke($"冻结输入: {plan.Items.Count} 个替换项");
 
         // 1. Freeze: the plan is only as good as the bytes that were hashed when it was built.
-        var shaBefore = ContainerFileHash.OfFile(workingCopy);
+        if (plan.PublishNewCopy && (File.Exists(workingCopy) || Directory.Exists(workingCopy)))
+            throw new IOException("输出位置已存在，请选择新文件。");
+        var input = plan.PublishNewCopy ? session.OriginalPath : workingCopy;
+        var shaBefore = ContainerFileHash.OfFile(input);
         if (ContainerFileHash.OfFile(session.OriginalPath) != session.OriginalSha256)
             throw new InvalidDataException("原始容器在生成计划后发生变化，写回已中止。");
         if (shaBefore != plan.WorkingCopySha256)
@@ -126,9 +129,9 @@ public static class ContainerWriteBackExecutor
         }
 
         // 2. Backup the copy as it is now; never overwrite an existing backup.
-        progress?.Invoke("备份当前副本");
+        progress?.Invoke(plan.PublishNewCopy ? "备份源容器" : "备份当前副本");
         Directory.CreateDirectory(Path.GetDirectoryName(plan.BackupPath));
-        File.Copy(workingCopy, plan.BackupPath, overwrite: false);
+        File.Copy(input, plan.BackupPath, overwrite: false);
         try
         {
             if (ContainerFileHash.OfFile(plan.BackupPath) != shaBefore)
@@ -153,10 +156,10 @@ public static class ContainerWriteBackExecutor
         {
             // 3. Build a separate candidate; the live copy remains unchanged until verification.
             progress?.Invoke("构建候选副本");
-            if (plan.RebuildWithBinary) BinaryRuntime.Rebuild(workingCopy, candidate, plan);
+            if (plan.RebuildWithBinary) BinaryRuntime.Rebuild(input, candidate, plan);
             else
             {
-                File.Copy(workingCopy, candidate, overwrite: false);
+                File.Copy(input, candidate, overwrite: false);
                 foreach (var item in plan.Items)
                 {
                     var replacement = File.ReadAllBytes(item.ReplacementPath);
@@ -180,13 +183,14 @@ public static class ContainerWriteBackExecutor
 
             // 5. Publish: atomic same-volume replace; readers never see a partial file.
             progress?.Invoke("发布新副本");
-            if (ContainerFileHash.OfFile(workingCopy) != shaBefore ||
+            if (ContainerFileHash.OfFile(input) != shaBefore ||
                 ContainerFileHash.OfFile(session.OriginalPath) != session.OriginalSha256)
                 throw new InvalidDataException("发布前复核发现原件或工作副本已变化，未发布候选，请重新核实。");
             foreach (var item in plan.Items)
                 if (ContainerFileHash.OfFile(item.ReplacementPath) != item.ReplacementSha256)
                     throw new InvalidDataException("发布前替换文件已变化，未发布候选。");
-            File.Replace(candidate, workingCopy, null);
+            if (plan.PublishNewCopy) File.Move(candidate, workingCopy);
+            else File.Replace(candidate, workingCopy, null);
             report.Published = true;
         }
         catch (Exception error)

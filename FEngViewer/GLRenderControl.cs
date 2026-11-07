@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Windows.Forms;
+using FEngLib.Assets;
 using FEngLib.Structures;
 using FEngRender.Data;
 using FEngRender.GL;
@@ -14,6 +15,7 @@ public partial class GLRenderControl : UserControl, IRenderControl
     private GLRenderTreeRenderer _renderer;
     private RenderTreeNode _selectedNode;
     private bool _frameQueued;
+    private ITextureProvider _textureProvider;
 
     [CanBeNull] private RenderTree _renderTree;
     private PreviewAspectRatio _previewAspect = PreviewAspectRatio.Standard4x3;
@@ -71,6 +73,16 @@ public partial class GLRenderControl : UserControl, IRenderControl
         }
     }
 
+    public ITextureProvider TextureProvider
+    {
+        get => _textureProvider;
+        set
+        {
+            _textureProvider = value;
+            if (_renderer != null) _renderer.TextureProvider = value;
+        }
+    }
+
     public void Init(string textureDir)
     {
         _renderer?.LoadTextures(textureDir);
@@ -112,6 +124,7 @@ public partial class GLRenderControl : UserControl, IRenderControl
     private void openglControl1_OpenGLInitialized(object sender, EventArgs e)
     {
         _renderer = new GLRenderTreeRenderer(openglControl1.OpenGL);
+        _renderer.TextureProvider = _textureProvider;
         _renderer.PrepareRender();
     }
 

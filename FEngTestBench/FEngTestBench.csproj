@@ -8,6 +8,9 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <Compile Include="..\FEngViewer\DocumentWorkspace.cs" Link="ViewerState\DocumentWorkspace.cs" />
+        <Compile Include="..\FEngViewer\WorkspaceDocument.cs" Link="ViewerState\WorkspaceDocument.cs" />
+        <Compile Include="..\FEngViewer\ProjectTextureOverrideSource.cs" Link="ViewerState\ProjectTextureOverrideSource.cs" />
         <ProjectReference Include="..\FEngLib\FEngLib.csproj"/>
         <ProjectReference Include="..\FEngRender\FEngRender.csproj"/>
     </ItemGroup>

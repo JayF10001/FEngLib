@@ -50,6 +50,8 @@ public partial class PackageView
         public string ChooseSaveTarget(WorkspaceDocument document, out bool isJson) =>
             _view.ChooseSaveTarget(document, out isJson);
 
+        public bool SaveContainerProject(bool chooseTarget) => _view.SaveContainerProject(chooseTarget);
+
         public SavePromptResult AskToSave(WorkspaceDocument document, string reason) =>
             _view.AskToSaveDocument(document, reason);
 
@@ -66,14 +68,22 @@ public partial class PackageView
     private TreeView _workspaceTree;
     private TreeNode _workspaceTopNode;
     private Panel _leftStack;
-    private Button _filesModeButton;
-    private Button _treeModeButton;
+    private Label _pageHeading;
     private Panel _statusBar;
     private Label _statusLeft;
     private Label _statusRight;
     private ContextMenuStrip _workspaceMenu;
     private ContextMenuStrip _tabContextMenu;
     private ToolStripMenuItem _recentDocumentsMenu;
+    private ToolStripMenuItem _saveMenu;
+    private ToolStripMenuItem _saveAsMenu;
+    private ToolStripMenuItem _saveAllMenu;
+    private ToolStripMenuItem _legacyWriteBackMenu;
+    private ToolStripMenuItem _cleanupMenu;
+    private ToolStripMenuItem _containerIndexMenu;
+    private ToolStripMenuItem _closeContainerMenu;
+    private ToolStripMenuItem _projectWriteBackMenu;
+    private readonly HashSet<string> _legacyFiles = new(StringComparer.OrdinalIgnoreCase);
     private Font _boldNodeFont;
     private ImageList _workspaceIcons;
 
@@ -81,11 +91,12 @@ public partial class PackageView
     private readonly Dictionary<string, TreeNode> _workspaceNodes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<TreeNode, string> _workspaceNodeCaptions = new();
     private readonly Dictionary<TreeNode, int> _workspaceNodeWidths = new();
-    private readonly List<string> _recentDocuments = new();
+    private readonly List<RecentEntry> _recentEntries = new();
     private WorkspaceDocument _boundDocument;
-    private WorkspaceLeftMode _leftMode = WorkspaceLeftMode.ObjectTree;
+    private WorkspaceLeftMode _leftMode = WorkspaceLeftMode.Files;
     private string _fileFilterText = "";
     private bool _syncingSearch;
+    private bool _bindingFailed;
 
     private WorkspaceDocument ActiveDocument => _workspace?.Active;
 
@@ -94,7 +105,10 @@ public partial class PackageView
         _workspace = new DocumentWorkspace(new WorkspacePrompts(this));
         _writeBack = new ContainerWriteBackCoordinator();
         _writeBack.PendingChanged += (_, _) => RefreshWorkspaceStructure();
-        _workspace.Saving += (_, save) => _writeBack.PrepareSave(save);
+        _workspace.Saving += (_, save) =>
+        {
+            if (_legacyFiles.Contains(save.Document.SourcePath)) _writeBack.PrepareSave(save);
+        };
         _workspace.SaveFinished += (_, save) => _writeBack.FinishSave(save);
         _writeBack.ConfirmVersionSwitch = message => MessageBox.Show(this, message,
             "切换待写回版本", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
@@ -105,6 +119,7 @@ public partial class PackageView
         BuildLeftPanel();
         BuildStatusBar();
         BuildMenus();
+        BuildProjectPages();
 
         _workspace.Changed += (_, _) => RefreshWorkspaceStructure();
         _workspace.StateChanged += (_, _) => RefreshWorkspaceState();
@@ -120,9 +135,10 @@ public partial class PackageView
         };
 
         TxtSearch.TextChanged += TxtSearch_TextChanged;
+        TxtSearch.KeyDown += TxtSearch_KeyDown;
         FormClosing += PackageView_FormClosing;
         ApplyMetricHeights();
-        SetLeftMode(WorkspaceLeftMode.ObjectTree);
+        ShowEmptyEditor();
         FinishLayoutToolTips();
         SetFormDetails();
     }
@@ -132,8 +148,9 @@ public partial class PackageView
     private void BuildTabBar()
     {
         _tabBar = new DocumentTabBar { Dock = DockStyle.Top, Height = 32, Margin = Padding.Empty };
-        _host.Controls.Add(_tabBar);
+        _host.Controls.Add(_tabBar, 0, 0);
 
+        _tabBar.WorkspaceRequested += () => _workspace.ShowWorkspace();
         _tabBar.SelectionRequested += index =>
         {
             if (index < 0 || index >= _workspace.Documents.Count) return;
@@ -152,28 +169,13 @@ public partial class PackageView
 
     private void BuildLeftPanel()
     {
-        // The mode switch reuses the existing object tree control next to the workspace file list.
-        _filesModeButton = CreateModeButton("FNG 文件", (_, _) => SetLeftMode(WorkspaceLeftMode.Files));
-        _treeModeButton = CreateModeButton("当前对象树", (_, _) => SetLeftMode(WorkspaceLeftMode.ObjectTree));
-
-        var modeLayout = new TableLayoutPanel
+        _pageHeading = new Label
         {
-            Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Margin = new Padding(0, 0, 0, 2)
+            Dock = DockStyle.Fill, AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold),
+            Padding = new Padding(5, 6, 3, 6), Margin = Padding.Empty
         };
-        modeLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        modeLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        _filesModeButton.Dock = DockStyle.Fill;
-        _treeModeButton.Dock = DockStyle.Fill;
-        modeLayout.Controls.Add(_filesModeButton, 0, 0);
-        modeLayout.Controls.Add(_treeModeButton, 1, 0);
 
-        // FNG mode: filter + sort. Object tree mode: previous/next + expand toggle. Only one set is
-        // visible at a time, so no dead buttons take up toolbar height.
         _fileSortCombo = new ComboBox
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
@@ -245,7 +247,7 @@ public partial class PackageView
         _leftToolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         _leftToolbar.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _leftToolbar.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        _leftToolbar.Controls.Add(modeLayout, 0, 0);
+        _leftToolbar.Controls.Add(_pageHeading, 0, 0);
         _leftToolbar.Controls.Add(_searchRow, 0, 1);
 
         _workspaceTree = new TreeView
@@ -278,7 +280,12 @@ public partial class PackageView
         _workspaceTree.NodeMouseDoubleClick += WorkspaceTree_NodeMouseDoubleClick;
         _workspaceTree.KeyDown += WorkspaceTree_KeyDown;
         _workspaceTree.MouseDown += WorkspaceTree_MouseDown;
-        _workspaceTree.AfterSelect += (_, _) => UpdateWorkspaceMenuState();
+        _workspaceTree.AfterSelect += (_, e) =>
+        {
+            UpdateWorkspaceMenuState();
+            if (e.Action == TreeViewAction.ByKeyboard && e.Node?.Tag is WorkspaceFile file)
+                PreviewWorkspaceFile(file);
+        };
 
         BuildWorkspaceMenu();
     }
@@ -286,29 +293,10 @@ public partial class PackageView
     private void ToggleTreeExpansion()
     {
         if (treeView1.Nodes.Count == 0) return;
-        var expand = !treeView1.Nodes[0].IsExpanded;
+        var expand = !FlattenTree(treeView1).Any(node=>node.Nodes.Count>0 && node.IsExpanded);
         if (expand) treeView1.ExpandAll();
         else treeView1.CollapseAll();
         _expandTreeButton.Text = expand ? "⊟" : "⊞";
-    }
-
-    /// <summary>Mode buttons size themselves from the font so a scaled UI never clips the label.</summary>
-    private Button CreateModeButton(string text, EventHandler onClick)
-    {
-        var button = new Button
-        {
-            Text = text,
-            FlatStyle = FlatStyle.Flat,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            MinimumSize = new Size(0, LineHeight + 10),
-            Margin = new Padding(0, 0, 2, 0),
-            UseVisualStyleBackColor = false
-        };
-        button.FlatAppearance.BorderColor = SystemColors.ControlDark;
-        button.FlatAppearance.BorderSize = 1;
-        button.Click += onClick;
-        return button;
     }
 
     private void ConfigureToolButton(Button button, string text)
@@ -394,7 +382,7 @@ public partial class PackageView
         _statusBar = new Panel { Dock = DockStyle.Bottom, Height = 24, Margin = Padding.Empty };
         _statusBar.Controls.Add(layout);
         _statusBar.Paint += (_, e) => e.Graphics.DrawLine(SystemPens.ControlDark, 0, 0, _statusBar.Width, 0);
-        _host.Controls.Add(_statusBar);
+        _host.Controls.Add(_statusBar, 0, 2);
     }
 
     private void BuildMenus()
@@ -408,17 +396,27 @@ public partial class PackageView
         items.Add(_recentDocumentsMenu);
         FileMenuItem.DropDownOpening += (_, _) => RefreshRecentDocumentsMenu();
         items.Add(new ToolStripSeparator());
-        items.Add(CreateMenuItem("Save", Keys.Control | Keys.S, (_, _) => SaveActiveDocument(false)));
-        items.Add(CreateMenuItem("Save as...", Keys.Control | Keys.Shift | Keys.S, (_, _) => SaveActiveDocument(true)));
-        items.Add(CreateMenuItem("Save all modified FNG", Keys.None, (_, _) => SaveAllModifiedDocuments()));
+        _saveMenu = CreateMenuItem("Save", Keys.Control | Keys.S, (_, _) => SaveActiveDocument(false));
+        _saveAsMenu = CreateMenuItem("Save as...", Keys.Control | Keys.Shift | Keys.S, (_, _) => SaveActiveDocument(true));
+        _saveAllMenu = CreateMenuItem("Save all modified FNG", Keys.None, (_, _) => SaveAllModifiedDocuments());
+        items.AddRange(new ToolStripItem[] { _saveMenu, _saveAsMenu, _saveAllMenu });
+        items.Add(CreateMenuItem("导出 FNG…", Keys.None, (_, _) => ExportFng(_workspace.Active)));
         items.Add(CreateMenuItem("Reload", Keys.Control | Keys.Shift | Keys.R, (_, _) => ReloadActiveDocument()));
         items.Add(new ToolStripSeparator());
-        items.Add(CreateMenuItem("Write back current container copy...", Keys.None, (_, _) => WriteBackCurrentContainer()));
+        items.Add(CreateMenuItem("配置 Binary 运行库…", Keys.None, (_, _) => ConfigureBinaryRuntime()));
+        _containerIndexMenu = CreateMenuItem("查看容器块索引…", Keys.None, (_, _) => ShowContainerBlockIndex());
+        _projectWriteBackMenu = CreateMenuItem("生成容器副本…", Keys.None, (_, _) => GenerateContainerCopy());
+        _closeContainerMenu = CreateMenuItem("关闭容器工程", Keys.None, (_, _) => LeaveContainerProject());
+        items.AddRange(new ToolStripItem[] { _containerIndexMenu, _projectWriteBackMenu, _closeContainerMenu });
+        items.Add(CreateMenuItem("旧流程：提取容器 FNG…", Keys.None, OpenLegacyContainerMenuItem_Click));
+        _legacyWriteBackMenu = CreateMenuItem("旧流程：写回容器副本…", Keys.None, (_, _) => WriteBackCurrentContainer());
+        items.Add(_legacyWriteBackMenu);
         items.Add(new ToolStripSeparator());
         items.Add(CreateMenuItem("Close tab", Keys.Control | Keys.W, (_, _) => CloseActiveDocument()));
-        items.Add(CreateMenuItem("Close all tabs", Keys.Control | Keys.Shift | Keys.W, (_, _) => _workspace.CloseAll()));
+        items.Add(CreateMenuItem("Close all tabs", Keys.Control | Keys.Shift | Keys.W, (_, _) => CloseWorkspaceTabs()));
         items.Add(new ToolStripSeparator());
-        items.Add(CreateMenuItem("Cleanup and save", Keys.None, CleanupAndSaveToolStripMenuItem_Click));
+        _cleanupMenu = CreateMenuItem("Cleanup and save", Keys.None, CleanupAndSaveToolStripMenuItem_Click);
+        items.Add(_cleanupMenu);
         items.Add(new ToolStripSeparator());
         items.Add(CreateMenuItem("Exit", Keys.None, (_, _) => Close()));
     }
@@ -445,7 +443,7 @@ public partial class PackageView
         _workspaceMenu.Items[0].Click += (_, _) => OpenWorkspaceFile(SelectedWorkspaceFile);
         _workspaceMenu.Items[1].Click += (_, _) =>
         {
-            var document = _workspace.FindDocument(SelectedWorkspaceFile?.Path);
+            var document = FindWorkspaceDocument(SelectedWorkspaceFile);
             if (document != null) _workspace.Close(document);
         };
         _workspaceMenu.Items[3].Click += (_, _) => RevealWorkspaceFile(SelectedWorkspaceFile);
@@ -453,7 +451,7 @@ public partial class PackageView
         _workspaceMenu.Items[6].Click += (_, _) =>
         {
             var file = SelectedWorkspaceFile;
-            if (file == null) return;
+            if (file == null || file.Project != null) return;
             if (_workspace.RemoveFile(file))
                 _workspace.StatusMessage = file.Caption + " 已从工作区移除（已打开的标签保持不变）";
         };
@@ -472,12 +470,13 @@ public partial class PackageView
     {
         if (_workspaceMenu == null) return;
         var file = SelectedWorkspaceFile;
-        var document = file == null ? null : _workspace.FindDocument(file.Path);
+        var document = FindWorkspaceDocument(file);
         _workspaceMenu.Items[0].Enabled = file != null;
         _workspaceMenu.Items[1].Enabled = document != null;
         _workspaceMenu.Items[3].Enabled = file != null;
-        _workspaceMenu.Items[4].Enabled = file != null && File.Exists(file.Path + ".source.json");
-        _workspaceMenu.Items[6].Enabled = file != null;
+        _workspaceMenu.Items[4].Enabled = file != null && (file.Project != null || File.Exists(file.Path + ".source.json"));
+        _workspaceMenu.Items[6].Enabled = file != null && file.Project == null;
+        _workspaceMenu.Items[7].Enabled = _containerProject == null;
     }
 
     #endregion
@@ -492,6 +491,8 @@ public partial class PackageView
         UpdateTabBar();
         RebuildWorkspaceTree();
         UpdateFileCountHint();
+        RefreshPreviewAfterWorkspaceChange();
+        UpdateProjectPage();
         SetFormDetails();
     }
 
@@ -501,6 +502,16 @@ public partial class PackageView
         UpdateWorkspaceNodeStates();
         UpdateWorkspaceMenuState();
         UpdateFileCountHint();
+        RefreshPreviewAfterWorkspaceChange();
+        UpdateProjectPage();
+        var active = _workspace.Active;
+        _saveMenu.Enabled = _saveAsMenu.Enabled = _containerProject != null || active != null;
+        _saveMenu.Text = _containerProject != null ? "保存工程" : "保存";
+        _saveAsMenu.Text = _containerProject != null ? "工程另存为…" : "另存为…";
+        _cleanupMenu.Enabled = active != null && active.Project == null;
+        _saveAllMenu.Enabled = _containerProject == null && _workspace.DirtyCount > 0;
+        _containerIndexMenu.Visible = _closeContainerMenu.Visible = _projectWriteBackMenu.Visible = _containerProject != null;
+        _legacyWriteBackMenu.Visible = active != null && active.Project == null && _legacyFiles.Contains(active.SourcePath);
         SetFormDetails();
     }
 
@@ -514,13 +525,13 @@ public partial class PackageView
         else _tabBar.SetItems(items);
         var index = _workspace.IndexOfDocument(_workspace.Active);
         _tabBar.SelectedIndex = index;
-        _tabBar.Visible = items.Length > 0;
+        _tabBar.Visible = true;
     }
 
     private void PackageView_FormClosing(object sender, FormClosingEventArgs e)
     {
         if (_workspace == null) return;
-        if (!_workspace.CloseAll())
+        if (!CloseWorkspaceTabs())
         {
             e.Cancel = true;
             return;
@@ -531,54 +542,52 @@ public partial class PackageView
 
     private void BindDocument(WorkspaceDocument document)
     {
-        ValidateChildren();
-        RememberEditorState();
+        if (!_bindingFailed)
+        {
+            ValidateChildren();
+            RememberEditorState();
+            RememberWorkspaceView();
+        }
+        _bindingFailed = false;
+        try { BindPreparedPage(document); }
+        catch { _bindingFailed = true; throw; }
+    }
+
+    private void BindPreparedPage(WorkspaceDocument document)
+    {
         if (document?.Package == null)
         {
             ShowEmptyEditor();
             return;
         }
 
-        var previous = _boundDocument;
-        try
-        {
-            _boundDocument = document;
-            _currentPackage = document.Package;
-            _currentRenderTree = GetRenderTree(document);
-            RenderGeometry.Prepare(_currentRenderTree);
-            viewOutput.ResetPreview();
-            viewOutput.SetView(document.CanvasZoom <= 0 ? 1 : document.CanvasZoom, document.CanvasPan, document.CanvasFit);
-            AppService.Instance.ActivatePackage(document.Package, document.FilePath, document.IsJson);
-            viewOutput.Init(document.TextureDirectory);
-            _packageViewExtensions.ObjectSelected = null;
-            _packageViewExtensions.ShouldCopyObject = false;
-            _packageViewExtensions.SearchText = document.SearchText;
-            _packageViewExtensions.SearchIndex = document.SearchIndex;
-            if (_leftMode == WorkspaceLeftMode.ObjectTree)
-            {
-                _syncingSearch = true;
-                try { TxtSearch.Text = document.SearchText; }
-                finally { _syncingSearch = false; }
-            }
-            SetPropertyTarget(null);
-            viewOutput.SelectedNode = null;
-            PopulateTreeView(document.Package, _currentRenderTree);
-            RestoreTreeSelection(document.SelectedTreeKey);
-            RestoreTreeView();
-            Render();
-            if(_leftMode==WorkspaceLeftMode.Files)viewOutput.StartPackagePreview(document.Package);
-            RememberRecentDocument(document);
-        }
-        catch (Exception error)
-        {
-            // A binding failure must not leave the previous document's model on screen.
-            _boundDocument = previous;
-            MessageBox.Show(this, $"无法显示文档：\n{document.FilePath}\n\n{error.Message}", "Document binding failed",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
-            ShowEmptyEditor();
-            return;
-        }
-
+        // Prepare the render data before changing any page bindings. Exceptions propagate to
+        // DocumentWorkspace, which restores Active and rebinds the previous page.
+        var tree = GetRenderTree(document);
+        RenderGeometry.Prepare(tree);
+        viewOutput.CancelInteraction();
+        viewOutput.ResetPreview();
+        PrepareTextureSources(document);
+        viewOutput.Init(document.TextureDirectory);
+        _boundDocument = document;
+        _currentPackage = document.Package;
+        _currentRenderTree = tree;
+        viewOutput.ReadOnly = false;
+        AppService.Instance.ActivatePackage(document.Package, document.FilePath, document.IsJson);
+        _packageViewExtensions.ObjectSelected = null;
+        _packageViewExtensions.ShouldCopyObject = false;
+        _packageViewExtensions.SearchText = document.SearchText;
+        _packageViewExtensions.SearchIndex = document.SearchIndex;
+        SetLeftMode(WorkspaceLeftMode.ObjectTree);
+        SetPropertyTarget(null);
+        viewOutput.SelectedNode = null;
+        PopulateTreeView(document.Package, tree);
+        RestoreTreeSelection(document.SelectedTreeKey);
+        RestoreTreeView();
+        Render();
+        RestoreEditorPreview(document);
+        viewOutput.SetView(document.CanvasZoom <= 0 ? 1 : document.CanvasZoom, document.CanvasPan, document.CanvasFit);
+        RememberRecentDocument(document);
         RefreshWorkspaceState();
     }
 
@@ -604,6 +613,7 @@ public partial class PackageView
     {
         var document = _boundDocument;
         if (document == null) return;
+        document.PreviewState = viewOutput.CapturePreviewState();
         viewOutput.CancelInteraction();
         document.CanvasZoom = viewOutput.Zoom;
         document.CanvasPan = viewOutput.Pan;
@@ -626,16 +636,18 @@ public partial class PackageView
         _packageViewExtensions.ShouldCopyObject = false;
         _packageViewExtensions.SearchText = null;
         _packageViewExtensions.SearchIndex = -1;
-        _rootNode = null;
         _syncingSearch = true;
-        try { TxtSearch.Text = ""; }
+        try { TxtSearch.Text = _fileFilterText; }
         finally { _syncingSearch = false; }
         treeView1.BeginUpdate();
         treeView1.Nodes.Clear();
         treeView1.EndUpdate();
         SetPropertyTarget(null);
         viewOutput.SelectedNode = null;
+        viewOutput.ReadOnly = true;
         viewOutput.Render(null);
+        SetLeftMode(WorkspaceLeftMode.Files);
+        RestoreWorkspacePreview();
         LblItemIndex.Text = "索引：00000";
         LblChildsCount.Text = "子对象：00000";
         RefreshWorkspaceState();
@@ -643,9 +655,82 @@ public partial class PackageView
 
     private void RememberRecentDocument(WorkspaceDocument document)
     {
-        _recentDocuments.RemoveAll(path => string.Equals(path, document.FilePath, StringComparison.OrdinalIgnoreCase));
-        _recentDocuments.Insert(0, document.FilePath);
-        while (_recentDocuments.Count > 10) _recentDocuments.RemoveAt(_recentDocuments.Count - 1);
+        if (document.Project == null)
+            RememberRecent(RecentEntryKind.LooseFng, document.FilePath);
+    }
+
+    private void RememberRecentProject(string path) => RememberRecent(RecentEntryKind.Project, path);
+    private void RememberRecentContainer(string path) => RememberRecent(RecentEntryKind.Container, path);
+
+    private void RememberRecent(RecentEntryKind kind, string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return;
+        path = Path.GetFullPath(path);
+        _recentEntries.RemoveAll(entry => string.Equals(entry.Path, path, StringComparison.OrdinalIgnoreCase));
+        _recentEntries.Insert(0, new RecentEntry(kind, path));
+        foreach (var value in Enum.GetValues<RecentEntryKind>())
+        {
+            var extra = _recentEntries.Where(entry => entry.Kind == value).Skip(10).ToArray();
+            foreach (var entry in extra) _recentEntries.Remove(entry);
+        }
+        PersistRecentEntries();
+    }
+
+    private void LoadRecentEntries()
+    {
+        _recentEntries.Clear();
+        var state = ViewerSettings.Load();
+        void Add(RecentEntryKind kind, string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+            var full = Path.GetFullPath(path);
+            if (_recentEntries.Any(entry => string.Equals(entry.Path, full, StringComparison.OrdinalIgnoreCase)))
+                return;
+            _recentEntries.Add(new RecentEntry(kind, full));
+        }
+        foreach (var path in state.RecentProjects ?? Array.Empty<string>())
+            Add(ClassifyRecentPath(path), path);
+        foreach (var path in state.RecentContainers ?? Array.Empty<string>())
+            Add(RecentEntryKind.Container, path);
+        foreach (var path in state.RecentFiles ?? Array.Empty<string>())
+            Add(RecentEntryKind.LooseFng, path);
+    }
+
+    private static RecentEntryKind ClassifyRecentPath(string path)
+    {
+        var extension = Path.GetExtension(path);
+        if (string.Equals(extension, ContainerProjectFile.Extension, StringComparison.OrdinalIgnoreCase))
+            return RecentEntryKind.Project;
+        if (string.Equals(extension, ".fng", StringComparison.OrdinalIgnoreCase))
+            return RecentEntryKind.LooseFng;
+        return RecentEntryKind.Container;
+    }
+
+    private void PersistRecentEntries()
+    {
+        var state = ViewerSettings.Load();
+        state.RecentProjects = _recentEntries.Where(entry => entry.Kind == RecentEntryKind.Project)
+            .Select(entry => entry.Path).Take(10).ToArray();
+        state.RecentContainers = _recentEntries.Where(entry => entry.Kind == RecentEntryKind.Container)
+            .Select(entry => entry.Path).Take(10).ToArray();
+        state.RecentFiles = _recentEntries.Where(entry => entry.Kind == RecentEntryKind.LooseFng)
+            .Select(entry => entry.Path).Take(10).ToArray();
+        ViewerSettings.Save(state);
+    }
+
+    private void OpenRecentEntry(RecentEntry entry)
+    {
+        if (entry == null) return;
+        if (!File.Exists(entry.Path))
+        {
+            MessageBox.Show(this, "文件不存在：\n\n" + entry.Path, "最近打开",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            _recentEntries.Remove(entry);
+            PersistRecentEntries();
+            RefreshRecentProjects();
+            return;
+        }
+        OpenWorkspacePath(entry.Path);
     }
 
     #endregion
@@ -669,10 +754,6 @@ public partial class PackageView
         _workspaceTree.Visible = mode == WorkspaceLeftMode.Files;
         treeView1.Visible = mode == WorkspaceLeftMode.ObjectTree;
         var files = mode == WorkspaceLeftMode.Files;
-        _filesModeButton.BackColor = files ? SystemColors.Highlight : EditorTheme.Surface;
-        _filesModeButton.ForeColor = files ? SystemColors.HighlightText : EditorTheme.Text;
-        _treeModeButton.BackColor = files ? EditorTheme.Surface : SystemColors.Highlight;
-        _treeModeButton.ForeColor = files ? EditorTheme.Text : SystemColors.HighlightText;
         _fileExtras.Visible = files;
         _treeExtras.Visible = !files;
         UpdateFileCountHint();
@@ -693,17 +774,8 @@ public partial class PackageView
             _packageViewExtensions.SearchText = TxtSearch.Text;
             _packageViewExtensions.SearchIndex = _workspace.Active?.SearchIndex ?? -1;
         }
+        UpdatePagePanels();
         UpdatePackagePreviewControls();
-        if(previous!=mode && _currentPackage!=null)
-        {
-            if(files)viewOutput.StartPackagePreview(_currentPackage);
-            else
-            {
-                viewOutput.ResetPreview();
-                viewOutput.SelectedNode=FindTreeOwner(treeView1.SelectedNode);
-                _inspector?.RefreshGeometry();
-            }
-        }
     }
 
     private string NodeSearchText() => _workspace?.Active?.SearchText;
@@ -719,30 +791,48 @@ public partial class PackageView
     private void TxtSearch_TextChanged(object sender, EventArgs e)
     {
         if (_syncingSearch) return;
-        if (_leftMode != WorkspaceLeftMode.Files) return;
-        _fileFilterText = TxtSearch.Text;
-        RebuildWorkspaceTree();
+        if (_leftMode == WorkspaceLeftMode.Files)
+        {
+            _fileFilterText = TxtSearch.Text;
+            RebuildWorkspaceTree();
+            return;
+        }
+
+        // Object-tree search is explicit: typing starts a new query, Enter (or ◀/▶) runs it.
+        _packageViewExtensions.SearchText = TxtSearch.Text;
+        _packageViewExtensions.SearchIndex = -1;
     }
 
-    /// <summary>The file count lives in the search placeholder and the mode tooltip, not in a row.</summary>
+    private void TxtSearch_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.KeyCode != Keys.Enter || _leftMode != WorkspaceLeftMode.ObjectTree || _currentPackage == null)
+            return;
+        e.Handled = true;
+        e.SuppressKeyPress = true;
+        FindNode(TxtSearch.Text, +1);
+    }
+
+    /// <summary>Counts belong to the global page; the editor heading names only its document.</summary>
     private void UpdateFileCountHint()
     {
         if (TxtSearch == null) return;
-        var count = _workspace?.FileCount ?? 0;
+        var count = _containerGroup?.Files.Count ?? _workspace?.FileCount ?? 0;
+        var groups = _containerGroup == null ? _workspace?.Groups.Count ?? 0 : 1;
         var opened = _workspace?.DocumentCount ?? 0;
         TxtSearch.PlaceholderText = _leftMode == WorkspaceLeftMode.Files
             ? $"搜索 FNG 文件（共 {count} 个）..."
-            : "搜索节点...";
-        if (_layoutToolTip != null && _filesModeButton != null)
-            _layoutToolTip.SetToolTip(_filesModeButton,
-                $"工作区 {count} 个 FNG，已打开 {opened} 个。\n状态点：灰=未打开，绿=已打开，蓝=当前文档，红=文件缺失");
+            : "搜索节点（Enter 查找）...";
+        if (_pageHeading != null)
+            _pageHeading.Text = _leftMode == WorkspaceLeftMode.Files
+                ? $"工作区\n{groups} 个来源 · {count} 个文件 · 已打开 {opened} · 已修改 {_workspace?.DirtyCount ?? 0}"
+                : "对象树 · " + (_boundDocument?.CaptionName ?? "");
     }
 
     private bool MatchesWorkspaceFilter(WorkspaceFile file, string filter)
     {
         if (string.IsNullOrEmpty(filter)) return true;
         return file.Caption.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
-               file.Path.Contains(filter, StringComparison.OrdinalIgnoreCase);
+               file.Location.Contains(filter, StringComparison.OrdinalIgnoreCase);
     }
 
     private void RebuildWorkspaceTree()
@@ -754,8 +844,9 @@ public partial class PackageView
         var selectedKey = _workspaceTree.SelectedNode?.Name;
         var topKey = (_leftMode == WorkspaceLeftMode.Files ? _workspaceTree.TopNode : _workspaceTopNode)?.Name;
         var sortByName = _fileSortCombo != null && _fileSortCombo.SelectedIndex == 1;
+        var groups = DisplayedWorkspaceGroups;
         var duplicateNames = new HashSet<string>(
-            _workspace.Files.GroupBy(file => file.Caption, StringComparer.OrdinalIgnoreCase)
+            groups.SelectMany(group => group.Files).GroupBy(file => file.Caption, StringComparer.OrdinalIgnoreCase)
                 .Where(group => group.Count() > 1)
                 .Select(group => group.Key),
             StringComparer.OrdinalIgnoreCase);
@@ -767,12 +858,12 @@ public partial class PackageView
             _workspaceNodes.Clear();
             _workspaceNodeCaptions.Clear();
             _workspaceNodeWidths.Clear();
-            foreach (var group in _workspace.Groups)
+            foreach (var group in groups)
             {
                 var files = group.Files.Where(file => MatchesWorkspaceFilter(file, filter)).ToList();
                 if (sortByName) files = files.OrderBy(file => file.Caption, StringComparer.OrdinalIgnoreCase).ToList();
                 if (files.Count == 0 && filter.Length > 0) continue;
-                var pendingInGroup = _writeBack?.PendingCount(group.Files) ?? 0;
+                var pendingInGroup = _writeBack?.PendingCount(group.Files.Where(file => file.Project == null && _legacyFiles.Contains(file.Path))) ?? 0;
                 var rootCaption = $"{group.Name} ({files.Count})" +
                                   (pendingInGroup > 0 ? $"　· 待写回 {pendingInGroup}" : "");
                 var root = new TreeNode(rootCaption)
@@ -790,12 +881,12 @@ public partial class PackageView
                     var caption = file.Caption;
                     // Same file name in different folders must stay distinguishable without hovering.
                     if (duplicateNames.Contains(file.Caption))
-                        caption += "  ·  " + ParentFolderName(file.Path);
-                    var node = new TreeNode(caption) { Name = file.Path, Tag = file };
-                    ApplyWorkspaceNodeState(node, file);
+                        caption += "  ·  " + (file.Project == null ? ParentFolderName(file.Path) : $"0x{file.Block.Offset:X8}");
+                    var node = new TreeNode(caption) { Name = file.Key, Tag = file };
                     RememberNodeCaption(node, caption);
+                    ApplyWorkspaceNodeState(node, file);
                     root.Nodes.Add(node);
-                    _workspaceNodes[file.Path] = node;
+                    _workspaceNodes[file.Key] = node;
                 }
 
                 if (files.Count > WorkspaceNodeLimit)
@@ -886,23 +977,32 @@ public partial class PackageView
             ApplyWorkspaceNodeState(pair.Value, file);
         }
 
+        ApplyWorkspaceNodeTextWidths();
         _workspaceTree.Invalidate();
     }
 
     private void ApplyWorkspaceNodeState(TreeNode node, WorkspaceFile file)
     {
-        var document = _workspace.FindDocument(file.Path);
+        var document = FindWorkspaceDocument(file);
         var isActive = document != null && ReferenceEquals(document, _workspace.Active);
+        var caption = _workspaceNodeCaptions.TryGetValue(node, out var stored) ? stored : node.Text;
+        if (caption.EndsWith(" *", StringComparison.Ordinal)) caption = caption[..^2];
+        if (document?.IsDirty == true) caption += " *";
+        if (!string.Equals(caption, stored, StringComparison.Ordinal))
+        {
+            RememberNodeCaption(node, caption);
+            node.Text = caption;
+        }
         // The check mark means "saved changes pending write-back"; unsaved edits keep the
         // existing open-state dot and the * suffix, so the two states never blend into one icon.
         var pending = !file.IsMissing && document?.IsDirty != true &&
-                      _writeBack != null && _writeBack.IsPending(file.Path);
+                      file.Project == null && _legacyFiles.Contains(file.Path) && _writeBack.IsPending(file.Path);
         node.ImageKey = node.SelectedImageKey = file.IsMissing ? "missing"
             : pending ? "pending"
             : document == null ? "idle"
             : isActive ? "active" : "open";
         node.NodeFont = document == null ? null : _boldNodeFont;
-        var tooltip = file.Caption + "\n" + file.Path;
+        var tooltip = file.Caption + "\n" + file.Location;
         if (file.IsMissing) tooltip += "\n状态：文件缺失（红点）";
         else if (pending) tooltip += "\n状态：有已保存修改，待写回容器副本（绿色勾）";
         else if (document == null) tooltip += "\n状态：未打开（灰点）";
@@ -914,13 +1014,13 @@ public partial class PackageView
     private void WorkspaceTree_NodeMouseClick(object sender, TreeNodeMouseClickEventArgs e)
     {
         if (e.Button == MouseButtons.Left && e.Node?.Tag is WorkspaceFile file)
-            OpenWorkspaceFile(file);
+            PreviewWorkspaceFile(file);
     }
 
     private void WorkspaceTree_NodeMouseDoubleClick(object sender, TreeNodeMouseClickEventArgs e)
     {
-        if (e.Button == MouseButtons.Left && e.Node?.Tag is WorkspaceFile file && OpenWorkspaceFile(file))
-            SetLeftMode(WorkspaceLeftMode.ObjectTree);
+        if (e.Button == MouseButtons.Left && e.Node?.Tag is WorkspaceFile file)
+            OpenWorkspaceFile(file);
     }
 
     private void WorkspaceTree_MouseDown(object sender, MouseEventArgs e)
@@ -938,9 +1038,9 @@ public partial class PackageView
             OpenWorkspaceFile(SelectedWorkspaceFile);
             e.Handled = true;
         }
-        else if (e.KeyCode == Keys.Delete && SelectedWorkspaceFile != null)
+        else if (e.KeyCode == Keys.Delete && SelectedWorkspaceFile is { Project: null } loose)
         {
-            _workspace.RemoveFile(SelectedWorkspaceFile);
+            _workspace.RemoveFile(loose);
             e.Handled = true;
         }
     }
@@ -948,23 +1048,16 @@ public partial class PackageView
     private bool OpenWorkspaceFile(WorkspaceFile file)
     {
         if (file == null) return false;
-        if (file.IsMissing)
+        if (file.IsMissing && _workspace.FindDocument(file.Path)?.IsLoaded != true)
         {
             MessageBox.Show(this, $"文件已不在磁盘上：\n{file.Path}\n\n请重新导入，或从工作区移除。", "文件缺失",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
 
-        // The first click already bound the active document. A second click should only
-        // change the navigation view, without rebuilding its object tree or textures.
-        var existing = _workspace.FindDocument(file.Path);
-        if (existing != null && ReferenceEquals(existing, _workspace.Active) && ReferenceEquals(existing, _boundDocument))
-        {
-            if(_leftMode==WorkspaceLeftMode.Files && !viewOutput.PackagePreviewActive)
-                viewOutput.StartPackagePreview(existing.Package);
-            return true;
-        }
-        var document = _workspace.OpenFile(file);
+        var document = file.Project == null ? _workspace.OpenFile(file) :
+            _workspace.OpenDocument(FindWorkspaceDocument(file) ?? CreateWorkspaceDocument(file), activate: true, reportError: true);
+        ResolveWorkspaceCaption(file, document);
         SetFormDetails();
         return document != null && ReferenceEquals(_boundDocument, document);
     }
@@ -974,7 +1067,8 @@ public partial class PackageView
         if (file == null) return;
         try
         {
-            var path = File.Exists(file.Path) ? file.Path : Path.GetDirectoryName(file.Path) ?? file.Path;
+            var source = file.Project?.Index.SourcePath ?? file.Path;
+            var path = File.Exists(source) ? source : Path.GetDirectoryName(source) ?? source;
             Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true });
         }
         catch (Exception error)
@@ -986,6 +1080,14 @@ public partial class PackageView
     private void ShowSourceInfo(WorkspaceFile file)
     {
         if (file == null) return;
+        if (file.Project != null)
+        {
+            var index = file.Project.Index;
+            MessageBox.Show(this,
+                $"{file.Location}\n\n源容器 SHA256\n{index.SourceSha256}\n\n块 ID 0x{file.Block.ChunkId:X8} · {file.Block.TotalLength:N0} 字节",
+                file.Caption, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
         var manifest = file.Path + ".source.json";
         if (!File.Exists(manifest))
         {
@@ -1055,16 +1157,12 @@ public partial class PackageView
             return;
         }
 
+        if (!LeaveContainerProject()) return;
         var name = new DirectoryInfo(dialog.SelectedPath).Name;
         var import = _workspace.Import(paths, false, name);
-        SetLeftMode(WorkspaceLeftMode.Files);
+        _workspace.ShowWorkspace();
         _workspace.StatusMessage = $"文件夹 {name}：加入 {import.Added.Count} 个文件（工作区共 {_workspace.FileCount} 个）";
-        if (_workspace.Active == null)
-        {
-            var opened = _workspace.OpenFirstAvailable(import.Added.Concat(import.Existing), out var failed);
-            if (opened != null) _workspace.StatusMessage += $"；已打开 {opened.Caption}";
-            else if (failed > 0) _workspace.StatusMessage += $"；{failed} 个文件无法解析";
-        }
+        PreviewFirstAvailable(import.Added.Concat(import.Existing));
 
         RefreshWorkspaceStructure();
     }
@@ -1072,9 +1170,9 @@ public partial class PackageView
     /// <summary>Adds the paths to the workspace, then opens documents only when the user asked to see them.</summary>
     private string ImportAndOpen(IReadOnlyList<string> paths, bool isJson, bool activateAll, string groupName = null)
     {
+        if (!LeaveContainerProject()) return null;
         groupName ??= GroupNameForFiles(paths);
         var import = _workspace.Import(paths, isJson, groupName);
-        if (paths.Count > 1) SetLeftMode(WorkspaceLeftMode.Files);
         var candidates = import.Added.Concat(import.Existing).ToList();
         var opened = 0;
         var failed = 0;
@@ -1130,16 +1228,15 @@ public partial class PackageView
         // Bind provenance before opening documents: saves must already have their session,
         // independently of how the extraction/browser dialogs are subsequently closed.
         var registration = _writeBack.RegisterAfterExtraction(containerPath, extractionDirectory);
+        _legacyFiles.UnionWith(paths);
         var import = _workspace.Import(paths, false, groupName, refreshExisting: true);
-        SetLeftMode(WorkspaceLeftMode.Files);
-        var opened = _workspace.OpenFirstAvailable(import.Added.Concat(import.Existing), out var failed);
+        _workspace.ShowWorkspace();
+        var previewed = PreviewFirstAvailable(import.Added.Concat(import.Existing));
         var text = $"已加入工作区 {import.Added.Count} 个文件";
         if (import.Existing.Count > 0) text += $"，已在工作区 {import.Existing.Count} 个";
         if (import.Refreshed > 0) text += $"，已重新读取 {import.Refreshed} 个已打开文档";
         if (import.KeptDirty > 0) text += $"，保留 {import.KeptDirty} 个未保存文档";
-        text += opened == null
-            ? failed > 0 ? $"；{failed} 个文件无法解析，未自动打开" : "；没有可打开的文档"
-            : $"；已打开 {opened.Caption}";
+        text += previewed ? "；已预览首个可读文件" : "；没有可预览的文件";
         text += "；" + registration;
         _workspace.StatusMessage = text;
         RefreshWorkspaceStructure();
@@ -1147,14 +1244,28 @@ public partial class PackageView
     }
 
     private void OpenContainerMenuItem_Click(object sender, EventArgs e)
+        => ChooseContainer(OpenContainerProject, includeProject: true);
+
+    private void OpenLegacyContainerMenuItem_Click(object sender, EventArgs e)
+        => ChooseContainer(OpenLegacyContainer);
+
+    private void ChooseContainer(Action<string> open, bool includeProject = false)
     {
         using var dialog = new OpenFileDialog
         {
-            Filter = "MW05 containers (*.bun, *.lzc)|*.bun;*.lzc",
+            Filter = includeProject
+                ? "容器或工程 (*.bun, *.lzc, *.fengproj)|*.bun;*.lzc;*.fengproj"
+                : "MW05 containers (*.bun, *.lzc)|*.bun;*.lzc",
             CheckFileExists = true
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        using var browser = new ContainerBrowser(dialog.FileName, ImportExtractedFiles) { Icon = Icon };
+        open(dialog.FileName);
+    }
+
+    private void OpenLegacyContainer(string path)
+    {
+        if (!LeaveContainerProject()) return;
+        using var browser = new ContainerBrowser(path, ImportExtractedFiles) { Icon = Icon };
         if (browser.ShowDialog(this) != DialogResult.OK) return;
         if (!string.IsNullOrWhiteSpace(browser.ExtractionSummary)) _workspace.StatusMessage = browser.ExtractionSummary;
         SetFormDetails();
@@ -1162,6 +1273,11 @@ public partial class PackageView
 
     private void SaveActiveDocument(bool chooseTarget)
     {
+        if (_containerProject != null)
+        {
+            SaveContainerProject(chooseTarget);
+            return;
+        }
         if (_workspace.Active == null)
         {
             MessageBox.Show(this, "当前没有打开的文档。", "Save", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -1374,9 +1490,13 @@ public partial class PackageView
         var closeOthers = new ToolStripMenuItem("关闭其他标签") { Enabled = _workspace.Documents.Count > 1 };
         closeOthers.Click += (_, _) => _workspace.CloseOthers(document);
         var closeAll = new ToolStripMenuItem("关闭所有标签") { Enabled = _workspace.Documents.Count > 0 };
-        closeAll.Click += (_, _) => _workspace.CloseAll();
-        var reveal = new ToolStripMenuItem("在文件夹中显示");
-        reveal.Click += (_, _) => RevealWorkspaceFile(new WorkspaceFile(document.FilePath, document.IsJson));
+        closeAll.Click += (_, _) => CloseWorkspaceTabs();
+        var reveal = new ToolStripMenuItem(document.Project == null ? "在文件夹中显示" : "导出 FNG…");
+        reveal.Click += (_, _) =>
+        {
+            if (document.Project != null) ExportFng(document);
+            else RevealWorkspaceFile(new WorkspaceFile(document.FilePath, document.IsJson));
+        };
         menu.Items.AddRange(new ToolStripItem[] { close, closeOthers, closeAll, new ToolStripSeparator(), reveal });
         EditorTheme.Apply(menu);
         menu.Show(Cursor.Position);
@@ -1386,11 +1506,14 @@ public partial class PackageView
     {
         while (_recentDocumentsMenu.DropDownItems.Count > 0)
             _recentDocumentsMenu.DropDownItems[0].Dispose();
-        _recentDocumentsMenu.Enabled = _recentDocuments.Count > 0;
-        foreach (var path in _recentDocuments.Take(8))
+        _recentDocumentsMenu.Enabled = _recentEntries.Count > 0;
+        foreach (var entry in _recentEntries.Take(12))
         {
-            var item = new ToolStripMenuItem(Path.GetFileName(path)) { ToolTipText = path };
-            item.Click += (_, _) => OpenWorkspacePath(path);
+            var item = new ToolStripMenuItem($"{entry.KindLabel} · {entry.DisplayName}")
+            {
+                ToolTipText = entry.Path
+            };
+            item.Click += (_, _) => OpenRecentEntry(entry);
             _recentDocumentsMenu.DropDownItems.Add(item);
         }
         EditorTheme.Apply(_recentDocumentsMenu.DropDown);
@@ -1407,6 +1530,12 @@ public partial class PackageView
 
     private void OpenWorkspacePath(string path)
     {
+        if (IsContainerPath(path) || IsProjectPath(path))
+        {
+            OpenContainerProject(path);
+            return;
+        }
+        if (!LeaveContainerProject()) return;
         var file = _workspace.FindFile(path);
         if (file == null)
         {
@@ -1476,7 +1605,7 @@ public partial class PackageView
 
     private SavePromptResult AskToSaveDocument(WorkspaceDocument document, string reason)
     {
-        var answer = MessageBox.Show(this, $"{reason}\n\n{document.FilePath}", $"未保存的修改 — {document.CaptionName}",
+        var answer = MessageBox.Show(this, $"{reason}\n\n{document.Location}", $"未保存的修改 — {document.CaptionName}",
             MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
         return answer switch
         {
@@ -1488,7 +1617,7 @@ public partial class PackageView
 
     private bool ConfirmDiscardDocument(WorkspaceDocument document, string reason)
     {
-        return MessageBox.Show(this, $"{reason}\n\n{document.FilePath}", "重新读取", MessageBoxButtons.YesNo,
+        return MessageBox.Show(this, $"{reason}\n\n{document.Location}", "重新读取", MessageBoxButtons.YesNo,
             MessageBoxIcon.Question) == DialogResult.Yes;
     }
 
@@ -1504,23 +1633,32 @@ public partial class PackageView
         {
             string.IsNullOrWhiteSpace(_workspace.StatusMessage) ? "就绪" : _workspace.StatusMessage
         };
-        if (_workspace.FileCount > 0 || _workspace.Groups.Count > 0)
+        if (_containerProject == null && (_workspace.FileCount > 0 || _workspace.Groups.Count > 0))
         {
-            var name = _workspace.DisplayName ?? "Workspace";
-            var extraGroups = _workspace.Groups.Count > 1 ? $" +{_workspace.Groups.Count - 1}" : "";
-            parts.Add($"工作区: {name}{extraGroups}");
+            parts.Add($"工作区: {_workspace.Groups.Count} 个来源");
             parts.Add($"文件: {_workspace.FileCount}");
         }
 
         parts.Add($"打开的文档: {_workspace.DocumentCount}");
         if (_workspace.DirtyCount > 0) parts.Add($"已修改: {_workspace.DirtyCount}");
+        if (_textureOverridesDirty) parts.Add("工程贴图覆盖未保存");
         if (active != null && NeedsTextureWarning(active)) parts.Add("无预览贴图");
+        var displayed = active ?? _previewDocument;
+        if (displayed != null && _textureResolver != null)
+        {
+            var archiveCount = _textureResolver.Sources.OfType<ArchiveTextureSource>().Sum(source => source.Archives.Count);
+            if (archiveCount > 0) parts.Add($"贴图来源: {archiveCount} 档案");
+        }
         _statusLeft.Text = string.Join("  |  ", parts);
-        _statusRight.Text = active == null ? "未打开文档" : $"{active.Caption}    {active.FilePath}";
+        _statusRight.Text = active == null
+            ? (_previewDocument == null ? "工作区" : "预览：" + _previewDocument.CaptionName)
+            : $"{active.Caption}    {active.Location}";
 
-        var title = "FEngViewer";
-        if (_workspace.FileCount > 0)
-            title += $" - {_workspace.DisplayName ?? "Workspace"} 工作区（{_workspace.FileCount} 个文件）";
+        var title = "FEngEditor";
+        if (_containerProject != null)
+            title += $" - 容器工程 · {Path.GetFileName(_containerProject.Index.SourcePath)}";
+        else if (_workspace.FileCount > 0)
+            title += $" - FNG 工程（{_workspace.FileCount} 个文件）";
         else if (active != null)
             title += $" - {active.CaptionName}";
 #if DEBUG
@@ -1529,8 +1667,12 @@ public partial class PackageView
         Text = title;
     }
 
-    private static bool NeedsTextureWarning(WorkspaceDocument document)
+    private bool NeedsTextureWarning(WorkspaceDocument document)
     {
+        if (_textureResolver?.Sources.OfType<ArchiveTextureSource>().Any(source => source.TextureCount > 0) == true)
+            return false;
+        if (_textureResolver?.Sources.OfType<ProjectTextureOverrideSource>().Any(source => source.Count > 0) == true)
+            return false;
         var requests = document.Package?.ResourceRequests;
         if (requests?.Any(request => request.Type is ResourceType.Image or ResourceType.MultiImage) != true)
             return false;

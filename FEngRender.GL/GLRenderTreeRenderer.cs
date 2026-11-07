@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using FEngLib.Assets;
 using FEngLib.Objects;
 using FEngLib.Packages;
 using FEngLib.Structures;
@@ -36,6 +37,31 @@ public class GLRenderTreeRenderer
         _stopwatch = Stopwatch.StartNew();
     }
 
+    private ITextureProvider _textureProvider;
+
+    /// <summary>
+    /// Resolves texture data from loose PNGs or game archives. Setting it drops the previous GL
+    /// texture cache so a source switch cannot keep stale pixels or stale "missing" decisions.
+    /// </summary>
+    public ITextureProvider TextureProvider
+    {
+        get => _textureProvider;
+        set
+        {
+            if (ReferenceEquals(_textureProvider, value)) return;
+            _textureProvider = value;
+            ClearTextureCache();
+        }
+    }
+
+    private void ClearTextureCache()
+    {
+        _resourceRequestToTexture.Clear();
+        foreach (var texture in _loadedTextures.Values)
+            texture.GLTexture.Destroy(_gl);
+        _loadedTextures.Clear();
+    }
+
     public RenderTreeNode SelectedNode { get; set; }
     public IObject<ObjectData> PreviewObject { get; set; }
     public uint? PreviewScript { get; set; }
@@ -52,10 +78,7 @@ public class GLRenderTreeRenderer
     public void LoadTextures(string directory)
     {
         // Opening a document must not create a textures folder beside the imported FNG.
-        _resourceRequestToTexture.Clear();
-        foreach (var texture in _loadedTextures.Values)
-            texture.GLTexture.Destroy(_gl);
-        _loadedTextures.Clear();
+        ClearTextureCache();
         if (!Directory.Exists(directory))
             return;
 
@@ -333,6 +356,37 @@ public class GLRenderTreeRenderer
 
         if (_resourceRequestToTexture.TryGetValue(resource.ID, out var texture)) return texture;
 
+        if (_textureProvider != null)
+        {
+            try
+            {
+                var resolution = _textureProvider.Resolve(resource);
+                if (resolution?.IsFound == true)
+                {
+                    try
+                    {
+                        texture = new Texture(_gl, resolution.PngData);
+                        _resourceRequestToTexture[resource.ID] = texture;
+                        return texture;
+                    }
+                    catch (Exception error)
+                    {
+                        Debug.WriteLine("Texture decode failed: {0} ({1})", new object[] { resolution.SourceTexture, error.Message });
+                    }
+                }
+                else if (resolution != null)
+                {
+                    Debug.WriteLine("Texture unresolved: {0} [{1}] {2}", new object[]
+                        { resolution.RequestedName, resolution.Status, resolution.Message });
+                }
+            }
+            catch (Exception error)
+            {
+                Debug.WriteLine("Texture provider failed: {0}", new object[] { error.Message });
+            }
+        }
+
+        // Fallback for callers that only configured a loose texture directory.
         var key = CleanResourcePath(resource.Name);
         if (!_loadedTextures.TryGetValue(key, out texture))
         {
@@ -343,7 +397,6 @@ public class GLRenderTreeRenderer
             _resourceRequestToTexture[resource.ID] = texture;
         }
 
-        //Debug.WriteLine("Texture not found: {0}", new object[] { key });
         return texture;
     }
 

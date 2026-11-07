@@ -48,6 +48,8 @@ public partial class GLRenderControl
     public bool ShowNames { get; set; }
     public bool ShowGroups { get; set; }
     public bool IsDragging => _dragging;
+    /// <summary>Workspace browsing allows navigation, but never object picking or model mutations.</summary>
+    public bool ReadOnly { get; set; }
     public float Zoom => _fit ? Math.Max(0.001f, _previewViewport.Height / 480f) : _zoom;
     public PointF Pan => _pan;
     public bool Fit => _fit;
@@ -104,6 +106,29 @@ public partial class GLRenderControl
         if(_renderer!=null){_renderer.PreviewFrames=null;_renderer.PreviewObject=null;_renderer.PreviewScript=null;}
         PrepareLayout();
         if(hadPreview)PreviewStateChanged?.Invoke();
+    }
+    internal PreviewPlaybackState CapturePreviewState() => _previewScript.HasValue || _packagePreview != null
+        ? new PreviewPlaybackState
+        {
+            ObjectGuid = _previewObject?.Guid, ScriptId = _previewScript, WholePackage = _packagePreview != null,
+            Elapsed = _pausedTime + (int)_previewClock.ElapsedMilliseconds, Playing = PreviewPlaying
+        } : null;
+
+    internal void RestorePreviewState(Package package, PreviewPlaybackState state)
+    {
+        if (state == null) return;
+        if (state.WholePackage) StartPackagePreview(package);
+        else
+        {
+            var obj = package.Objects.FirstOrDefault(o => o.Guid == state.ObjectGuid);
+            if (obj == null || !state.ScriptId.HasValue || !obj.GetScripts().Any(s => s.Id == state.ScriptId)) return;
+            StartPreview(obj, state.ScriptId.Value);
+        }
+        _pausedTime = state.Elapsed;
+        _previewClock.Reset();
+        if (state.Playing) _previewClock.Start();
+        PreviewStateChanged?.Invoke();
+        RequestFrame();
     }
     public void PrepareLayout() { RenderGeometry.Prepare(_renderTree); RequestFrame(); }
 
@@ -200,7 +225,7 @@ public partial class GLRenderControl
     private void EditorMouseDown(object sender,MouseEventArgs e)
     {
         openglControl1.Focus();
-        if (e.Button==MouseButtons.Middle || e.Button==MouseButtons.Left && Tool==CanvasTool.Pan)
+        if (e.Button==MouseButtons.Middle || e.Button==MouseButtons.Left && (ReadOnly || Tool==CanvasTool.Pan))
         { _panning=true; _mouseStart=e.Location; _panStart=_pan; HoveredNode=null; openglControl1.Cursor=Cursors.Hand; openglControl1.Capture=true; return; }
         if(e.Button!=MouseButtons.Left || _renderTree==null || !PreviewViewport.Contains(e.Location)) return;
         HoveredNode=null;
@@ -242,6 +267,7 @@ public partial class GLRenderControl
     {
         if(_panning)
         { _pan=new PointF(_panStart.X+e.X-_mouseStart.X,_panStart.Y+e.Y-_mouseStart.Y); PreviewViewportChanged?.Invoke(this,EventArgs.Empty); RequestFrame(); return; }
+        if (ReadOnly) { HoveredNode=null; openglControl1.Cursor=Cursors.Hand; return; }
         if(_dragArmed && !_dragging && e.Button==MouseButtons.Left)
         {
             var threshold=SystemInformation.DragSize;

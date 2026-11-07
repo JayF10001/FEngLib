@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace FEngViewer;
@@ -12,7 +13,8 @@ namespace FEngViewer;
 /// </summary>
 public partial class PackageView
 {
-    private Panel _host;
+    private TableLayoutPanel _host;
+    private Panel _pageHost;
     private SplitContainer _splitOuter;
     private SplitContainer _innerSplit;
     private TableLayoutPanel _leftToolbar;
@@ -42,9 +44,19 @@ public partial class PackageView
 
         _layoutToolTip = new ToolTip { ShowAlways = true, InitialDelay = 400, ReshowDelay = 200 };
 
-        _host = new Panel { Dock = DockStyle.Fill, Name = "workspaceHost" };
+        _host = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, Name = "workspaceHost",
+            ColumnCount = 1, RowCount = 3, GrowStyle = TableLayoutPanelGrowStyle.FixedSize
+        };
+        _host.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        _host.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         Controls.Add(_host);
         _host.BringToFront();
+        _pageHost = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+        _host.Controls.Add(_pageHost, 0, 1);
 
         _splitOuter = new SplitContainer
         {
@@ -65,7 +77,7 @@ public partial class PackageView
             TabStop = false
         };
         _splitOuter.Panel2.Controls.Add(_innerSplit);
-        _host.Controls.Add(_splitOuter);
+        _pageHost.Controls.Add(_splitOuter);
         ApplyMinimumSizes();
         // SplitterMoving only fires for real drags, so programmatic clamps never overwrite the preference.
         _splitOuter.SplitterMoving += (_, e) =>
@@ -119,16 +131,12 @@ public partial class PackageView
     }
 
     /// <summary>
-    /// The mode buttons sit side by side, so the left column must be wide enough for the longest
-    /// label at the current font (a DPI-scaled UI needs more room than 180px).
+    /// Leave room for the search controls at the current font/DPI.
     /// </summary>
     private int DesiredLeftMinimum()
     {
-        var widest = Math.Max(
-            TextRenderer.MeasureText("FNG 文件", Font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPrefix).Width,
-            TextRenderer.MeasureText("当前对象树", Font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPrefix).Width);
-        var button = widest + Math.Max(20, LineHeight + 6);
-        return Math.Clamp(button * 2 + 10, ViewerSettings.MinLeftWidth, 460);
+        return Math.Clamp(TextRenderer.MeasureText("搜索节点…", Font).Width + LineHeight * 7,
+            ViewerSettings.MinLeftWidth, 460);
     }
 
     private int LineHeight => Math.Max(12, Font.Height);
@@ -235,7 +243,7 @@ public partial class PackageView
     private void BuildPropertyArea()
     {
         _propertyHeader = new Panel { Dock = DockStyle.Top, Margin = Padding.Empty };
-        var propertyTitle = new Label
+        _propertyTitle = new Label
         {
             Text = "属性",
             Dock = DockStyle.Fill,
@@ -252,7 +260,7 @@ public partial class PackageView
         };
         _collapseRightButton.FlatAppearance.BorderSize = 0;
         _collapseRightButton.Click += (_, _) => SetRightCollapsed(true);
-        _propertyHeader.Controls.Add(propertyTitle);
+        _propertyHeader.Controls.Add(_propertyTitle);
         _propertyHeader.Controls.Add(_collapseRightButton);
         _propertyHeader.Paint += (_, e) =>
             e.Graphics.DrawLine(SystemPens.ControlDark, 0, _propertyHeader.Height - 1, _propertyHeader.Width, _propertyHeader.Height - 1);
@@ -263,7 +271,7 @@ public partial class PackageView
         _propertyEmptyLabel = new Label
         {
             Dock = DockStyle.Fill,
-            Text = "未选中对象\r\n在左侧「当前对象树」中选择节点以编辑属性",
+            Text = "未选中对象\r\n在左侧对象树或画布中选择对象以编辑属性",
             TextAlign = ContentAlignment.MiddleCenter,
             ForeColor = SystemColors.GrayText,
             BackColor = SystemColors.Window
@@ -278,6 +286,7 @@ public partial class PackageView
         _innerSplit.Panel2.Controls.Add(_propertyHeader);
         _innerSplit.Panel2.Controls.Add(groupBox1);
         _propertyEmptyLabel.BringToFront();
+        BuildWorkspaceDetails();
 
         _layoutToolTip.SetToolTip(_collapseRightButton, "折叠属性面板，把空间让给预览");
     }
@@ -286,11 +295,12 @@ public partial class PackageView
     private void FinishLayoutToolTips()
     {
         if (_layoutToolTip == null) return;
-        if (_filesModeButton != null)
-            _layoutToolTip.SetToolTip(_filesModeButton,
+        if (_pageHeading != null)
+            _layoutToolTip.SetToolTip(_pageHeading,
                 "工作区 FNG 列表。状态点：灰=未打开，绿=已打开，蓝=当前文档，红=文件缺失");
-        if (_treeModeButton != null)
-            _layoutToolTip.SetToolTip(_treeModeButton, "当前文档的对象树");
+        if (TxtSearch != null)
+            _layoutToolTip.SetToolTip(TxtSearch,
+                "文件模式：实时过滤；对象树模式：输入后按 Enter 或 ◀/▶ 查找节点");
     }
 
     #region Preview aspect ratio
@@ -443,7 +453,7 @@ public partial class PackageView
             if (state.RightCollapsed) SetRightCollapsed(true, rememberWidth: false);
 
             ApplyPreviewAspectFromState(state.PreviewAspect);
-            SetLeftMode(state.LeftMode == "tree" ? WorkspaceLeftMode.ObjectTree : WorkspaceLeftMode.Files);
+            SetLeftMode(_boundDocument == null ? WorkspaceLeftMode.Files : WorkspaceLeftMode.ObjectTree);
         }
         catch (Exception)
         {
@@ -462,7 +472,13 @@ public partial class PackageView
             RightWidth = _rightWidth,
             PreviewAspect = PreviewLayout.ModeName(viewOutput.PreviewAspect),
             LeftMode = _leftMode == WorkspaceLeftMode.Files ? "files" : "tree"
-            ,SimpleTree = _simpleTree, DarkTheme = EditorTheme.Dark
+            ,SimpleTree = _simpleTree, DarkTheme = EditorTheme.Dark,
+            RecentProjects = _recentEntries.Where(entry => entry.Kind == RecentEntryKind.Project)
+                .Select(entry => entry.Path).Take(10).ToArray(),
+            RecentContainers = _recentEntries.Where(entry => entry.Kind == RecentEntryKind.Container)
+                .Select(entry => entry.Path).Take(10).ToArray(),
+            RecentFiles = _recentEntries.Where(entry => entry.Kind == RecentEntryKind.LooseFng)
+                .Select(entry => entry.Path).Take(10).ToArray()
         };
         // Save the preferred widths, not the ones clamped by the current (possibly small) window; the
         // restore path clamps them again to whatever window the next session opens with.
@@ -488,8 +504,9 @@ public partial class PackageView
     {
         var localized=target==null?null:new LocalizedProperties(target,EditAdvanced);
         objectPropertyGrid.SelectedObject = localized;
+        if (_inspector != null) _inspector.CanViewTextureSource = IsContainerEditDocument();
         _inspector?.ShowTarget(localized, target==null?null:FindTreeOwner(treeView1.SelectedNode), _currentPackage,
             (_boundDocument ?? ActiveDocument)?.TextureDirectory, treeView1.SelectedNode?.Tag is not FEngRender.Data.RenderTreeNode);
-        if (_propertyEmptyLabel != null) _propertyEmptyLabel.Visible = target == null;
+        if (_propertyEmptyLabel != null) _propertyEmptyLabel.Visible = target == null && _leftMode == WorkspaceLeftMode.ObjectTree;
     }
 }

@@ -78,19 +78,10 @@ public sealed class FngContainer
                 {
                     try
                     {
-                        var codecOffset = offset + (id == CompressedFngChunkId ? 12 : 20);
-                        stream.Position = codecOffset;
-                        var body = BinaryRuntime.Decompress(reader.ReadBytes(checked((int)(end - codecOffset))));
-                        using var bytes = new MemoryStream();
-                        using var writer = new BinaryWriter(bytes, Encoding.UTF8, true);
-                        writer.Write(FngChunkId); writer.Write(body.Length); writer.Write(body);
-                        bytes.Position = 8;
-                        using var decodedReader = new BinaryReader(bytes, Encoding.UTF8, true);
-                        var canonical = ReadEntry(decodedReader, 0, FngChunkId, (uint)body.Length);
-                        if (!canonical.CanExtract) throw new InvalidDataException("解压后的 FNG 无效：" + canonical.Diagnostic);
+                        var bytes = DecodeEntry(reader, offset, id, end, out var canonical);
                         entry = new FngContainerEntry(offset, FngChunkId, bytes.Length, canonical.Name,
                             FngStorageKind.Uncompressed, "已由 Binary 解压；写回时重建容器", canonical.Sha256)
-                            { DecodedBytes = bytes.ToArray() };
+                            { DecodedBytes = bytes };
                     }
                     catch (Exception error) when (error is IOException or InvalidDataException or NotSupportedException or ArgumentException)
                     {
@@ -113,7 +104,8 @@ public sealed class FngContainer
     }
 
     /// <summary>Shared with <see cref="ContainerBlockIndex"/> so both scanners classify blocks identically.</summary>
-    internal static FngContainerEntry ReadEntry(BinaryReader reader, long offset, uint id, uint length)
+    internal static FngContainerEntry ReadEntry(BinaryReader reader, long offset, uint id, uint length,
+        bool hashEntry = true)
     {
         var stream = reader.BaseStream;
         var payloadOffset = offset + 8;
@@ -151,7 +143,7 @@ public sealed class FngContainer
             if (!name.EndsWith(".fng", StringComparison.OrdinalIgnoreCase) || name.Any(char.IsControl))
                 throw new InvalidDataException("Invalid FNG package name.");
             stream.Position = offset;
-            var hash = HashRange(stream, length + 8L);
+            var hash = hashEntry ? HashRange(stream, length + 8L) : null;
             return new FngContainerEntry(offset, id, length + 8L, name,
                 FngStorageKind.Uncompressed, null, hash);
         }
@@ -160,6 +152,26 @@ public sealed class FngContainer
             return new FngContainerEntry(offset, id, length + 8L, null,
                 FngStorageKind.Invalid, error.Message, null);
         }
+    }
+
+    internal static byte[] DecodeEntry(BinaryReader reader, long offset, uint id, long end,
+        out FngContainerEntry canonical)
+    {
+        var codecOffset = offset + (id == CompressedFngChunkId ? 12 : 20);
+        reader.BaseStream.Position = codecOffset;
+        var body = BinaryRuntime.Decompress(reader.ReadBytes(checked((int)(end - codecOffset))));
+        var bytes = new byte[checked(body.Length + 8)];
+        using var stream = new MemoryStream(bytes);
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, true);
+        writer.Write(FngChunkId);
+        writer.Write(body.Length);
+        writer.Write(body);
+        stream.Position = 8;
+        using var decodedReader = new BinaryReader(stream);
+        canonical = ReadEntry(decodedReader, 0, FngChunkId, (uint)body.Length);
+        if (!canonical.CanExtract)
+            throw new InvalidDataException("解压后的 FNG 无效：" + canonical.Diagnostic);
+        return bytes;
     }
 
     private static FngContainerEntry CompressedEntry(BinaryReader reader, long offset, uint id,

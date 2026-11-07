@@ -35,7 +35,12 @@ public class AppService
     public Package ReadFile(string path)
     {
         using var fs = new FileStream(path, FileMode.Open);
-        using var fr = new BinaryReader(fs);
+        return ReadFng(fs, path);
+    }
+
+    internal Package ReadFng(Stream fs, string path)
+    {
+        using var fr = new BinaryReader(fs, System.Text.Encoding.UTF8, leaveOpen: true);
         var marker = fr.ReadUInt32();
         switch (marker)
         {

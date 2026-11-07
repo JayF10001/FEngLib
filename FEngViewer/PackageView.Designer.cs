@@ -323,7 +323,7 @@ namespace FEngViewer
 			this.Controls.Add(this.menuStrip1);
 			this.MinimumSize = new System.Drawing.Size(820, 560);
 			this.Name = "PackageView";
-			this.Text = "FEngViewer";
+			this.Text = "FEngEditor";
 			this.Load += this.PackageView_Load;
 			this.menuStrip1.ResumeLayout(false);
 			this.menuStrip1.PerformLayout();

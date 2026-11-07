@@ -86,8 +86,8 @@ internal sealed class WriteBackPreviewDialog : Form
         }
 
         lines.Add($"原始容器（只读基线）: {plan.OriginalPath}");
-        lines.Add($"工作副本（写回目标）: {plan.WorkingCopyPath ?? "(尚未创建)"}");
-        lines.Add($"输入副本 SHA256    : {plan.WorkingCopySha256 ?? "—"}");
+        lines.Add($"{(plan.PublishNewCopy ? "新容器副本" : "工作副本（写回目标）")}: {plan.WorkingCopyPath ?? "(尚未创建)"}");
+        lines.Add($"输入 SHA256        : {plan.WorkingCopySha256 ?? "—"}");
         lines.Add($"备份位置           : {plan.BackupPath ?? "—"}");
         lines.Add($"容器块             : {plan.BlockCount} 个，本次替换 {plan.Items.Count(i => i.IsRunnable)} 个");
         lines.Add($"账本待写回         : {plan.PendingChangeCount} 个（预检阻断时也会保留计数）");
@@ -95,9 +95,9 @@ internal sealed class WriteBackPreviewDialog : Form
         foreach (var item in plan.Items.Where(i => i.IsRunnable))
         {
             lines.Add(plan.RebuildWithBinary
-                ? $"  ▸ {item.PackageName}　{item.StoredLength} → {item.ReplacementStoredLength} 字节（Binary 重建）"
+                ? $"  ▸ {item.PackageName}　源块 0x{item.BlockOffset:X}　{item.StoredLength} → {item.ReplacementStoredLength} 字节（Binary 重建）"
                 : $"  ▸ {item.PackageName}　块 0x{item.BlockOffset:X}　{item.StoredLength} 字节（等长替换）");
-            lines.Add($"      替换文件 : {item.ReplacementPath}");
+            if (!plan.PublishNewCopy) lines.Add($"      替换文件 : {item.ReplacementPath}");
             lines.Add($"      替换摘要 : {item.ReplacementSha256}");
             lines.Add($"      块内现有 : {item.CurrentBlockSha256}");
             lines.Add("");

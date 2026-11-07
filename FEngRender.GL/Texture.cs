@@ -1,4 +1,6 @@
-﻿using System.Drawing;
+using System;
+using System.Drawing;
+using System.IO;
 using SharpGL;
 
 namespace FEngRender.GL;
@@ -14,6 +16,18 @@ public class Texture
     {
         GLTexture = new SharpGL.SceneGraph.Assets.Texture();
         using var image = new Bitmap(path);
+
+        Width = image.Width;
+        Height = image.Height;
+        GLTexture.Create(gl, image);
+    }
+
+    /// <summary>Creates a GL texture from PNG bytes supplied by an asset resolver.</summary>
+    public Texture(OpenGL gl, byte[] pngData)
+    {
+        GLTexture = new SharpGL.SceneGraph.Assets.Texture();
+        using var stream = new MemoryStream(pngData ?? Array.Empty<byte>(), writable: false);
+        using var image = new Bitmap(stream);
 
         Width = image.Width;
         Height = image.Height;

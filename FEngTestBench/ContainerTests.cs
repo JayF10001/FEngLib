@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Numerics;
 using System.Text;
@@ -10,6 +11,7 @@ using FEngLib.Assets;
 using FEngLib.Objects;
 using FEngLib.Packages;
 using FEngLib.Structures;
+using FEngViewer;
 
 namespace FEngTestBench;
 
@@ -37,6 +39,19 @@ internal static class ContainerTests
             var path = Path.Combine(root, name);
             File.WriteAllBytes(path, bytes);
             return path;
+        }
+        Package ReadContainerPackage(ContainerFngContent content)
+        {
+            using var stream = content.OpenRead();
+            using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+            if (reader.ReadUInt32() != FngContainer.FngChunkId)
+                throw new InvalidDataException("Container FNG has no FNG chunk header.");
+            stream.Position = 0x10;
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            buffer.Position = 0;
+            using var payload = new BinaryReader(buffer);
+            return new FrontendPackageLoader(new HashResolver()).Load(payload);
         }
 
         try
@@ -145,6 +160,183 @@ internal static class ContainerTests
                 Block(FngContainer.CompressedFngChunkId, compressedPayload))));
             Check(nested.Entries.Single().Storage == FngStorageKind.Compressed &&
                 nested.Entries[0].Diagnostic.Contains("JDLZ"), "Nested compressed wrapper was not detected.");
+            var projectPath = Save("project.bun", Block(FngContainer.CompressedFngChunkId, compressedPayload)
+                .Concat(Block(0xB3300000, Array.Empty<byte>())).Concat(fng).Concat(fng).ToArray());
+            var project = ContainerProject.Open(projectPath);
+            var indexed = project.Index.Blocks;
+            Check(indexed.Count == 4 && indexed[0].Kind == ContainerBlockKind.CompressedFng &&
+                indexed[0].PackageName == null && indexed[1].Kind == ContainerBlockKind.Tpk,
+                "Project scan decoded an invalid compressed payload or lost resource classification.");
+            var lazyContent = project.ReadFng(indexed[2]);
+            using (var bytes = lazyContent.OpenRead())
+                Check(bytes.Length == fng.Length && lazyContent.Source.PackageName == "Duplicate.fng" &&
+                    lazyContent.Source.OriginalSha256 == Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fng)),
+                    "Lazy FNG content or provenance is incorrect.");
+            Check(ReferenceEquals(lazyContent, project.ReadFng(indexed[2])) &&
+                project.ReadFng(indexed[3]).Source.Block.Offset != lazyContent.Source.Block.Offset,
+                "The cache did not preserve block identity for duplicate names.");
+            var lazyDocument = new WorkspaceDocument(project, indexed[2], ReadContainerPackage);
+            lazyDocument.EnsureLoaded(null);
+            Check(lazyDocument.Package?.Name == "Duplicate.fng",
+                "Container document with a null external loader did not load.");
+            var foreign = ContainerProject.Open(projectPath);
+            Reject<ArgumentException>(() => project.ReadFng(foreign.Index.Blocks[2]), "Accepted a foreign project block.");
+            var projectFile = Path.Combine(root, "sparse.fengproj");
+            var replacement = MakeFngWithObject("Duplicate.fng", 42f);
+            var edit = ContainerProjectFile.CreateEdit(lazyContent.Source, replacement);
+            var tabs = new[] { indexed[3].Offset, indexed[2].Offset };
+            var onePixelPng = Convert.FromBase64String(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==");
+            var textureOverride = ContainerTextureOverride.Create(indexed[2].Offset, 0x1234ABCD,
+                "Test.tga", "test.png", onePixelPng, projectPath, "FRONTENDTEXTURES", 0, 358,
+                "NOCARS_ICONS", 0xE9E11100, "TEXCOMP_DXTC3");
+            Reject<InvalidDataException>(() => ContainerTextureOverride.Create(indexed[2].Offset, 1,
+                "Bad.tga", "bad.png", new byte[] { 1, 2, 3 }), "Accepted a non-PNG texture override.");
+            ContainerProjectFile.Save(projectFile, new ContainerProjectSnapshot(project, new[] { edit },
+                new[] { textureOverride }, tabs, tabs[0]));
+            var reopened = ContainerProjectFile.Load(projectFile);
+            Check(reopened.SourcePath == projectPath && reopened.BasePath != null &&
+                !ContainerSession.PathsEqual(reopened.BasePath, projectPath) &&
+                File.Exists(reopened.BasePath) && reopened.Project.BaselinePath == reopened.BasePath &&
+                reopened.Project.Index.SourcePath == projectPath,
+                "Project did not create and record an independent baseline.");
+            Check(ContainerSession.PathsEqual(reopened.Textures[0].TargetArchivePath, reopened.BasePath),
+                "Texture target was not remapped from the source to the baseline.");
+            using (var zip = ZipFile.OpenRead(projectFile))
+                Check(zip.Entries.Count == 3 && zip.GetEntry("project.json") != null &&
+                    zip.GetEntry($"textures/{indexed[2].Offset:X16}/1234ABCD.png") != null,
+                    "Project stored unmodified FNG data, missed its manifest or texture override.");
+            Check(reopened.Textures.Count == 1 && reopened.Textures[0].Width == 1 &&
+                reopened.Textures[0].Height == 1 && reopened.Textures[0].RequestId == 0x1234ABCD &&
+                reopened.Textures[0].RequestName == "Test.tga" &&
+                reopened.Textures[0].TargetTpkName == "FRONTENDTEXTURES" &&
+                reopened.Textures[0].TargetTextureName == "NOCARS_ICONS" &&
+                reopened.Textures[0].TargetBinKey == 0xE9E11100 &&
+                reopened.Textures[0].TargetCompression == "TEXCOMP_DXTC3" &&
+                reopened.Textures[0].PngData.SequenceEqual(onePixelPng),
+                "Project texture override identity or payload was not restored.");
+            using (var bytes = reopened.Edits.Single().OpenRead())
+            using (var reader = new BinaryReader(bytes))
+                Check(reader.ReadBytes(replacement.Length).SequenceEqual(replacement) &&
+                    reopened.Edits[0].Source.Block.Offset == indexed[2].Offset &&
+                    reopened.Tabs.SequenceEqual(tabs) && reopened.ActiveTab == tabs[0],
+                    "Sparse project failed to restore replacement, exact offset, tab order or active tab.");
+            ContainerProjectFile.Save(projectFile, new ContainerProjectSnapshot(reopened.Project, reopened.Edits,
+                reopened.Textures, new[] { tabs[0] }, null));
+            Check(ContainerProjectFile.Load(projectFile).Edits.Count == 1,
+                "Saving an edited FNG with a closed tab lost its payload.");
+            var newerProject = Path.Combine(root, "newer.fengproj");
+            File.Copy(projectFile, newerProject);
+            using (var zip = ZipFile.Open(newerProject, ZipArchiveMode.Update))
+            using (var manifest = zip.GetEntry("project.json").Open())
+            {
+                var metadata = System.Text.Json.Nodes.JsonNode.Parse(manifest);
+                metadata["Version"] = 999;
+                manifest.SetLength(0);
+                JsonSerializer.Serialize(manifest, metadata);
+            }
+            Reject<NotSupportedException>(() => ContainerProjectFile.Load(newerProject), "Accepted an unknown project version.");
+            using (var zip = ZipFile.Open(projectFile, ZipArchiveMode.Update))
+            {
+                var zipEntry = zip.Entries.Single(entry => entry.FullName.StartsWith("fng/"));
+                using var stream = zipEntry.Open();
+                stream.WriteByte(0);
+            }
+            Reject<InvalidDataException>(() => ContainerProjectFile.Load(projectFile), "Accepted corrupted project payload.");
+            using (var changed = File.OpenWrite(projectPath)) changed.WriteByte(0xFF);
+            Reject<InvalidDataException>(() => project.ReadFng(indexed[2]), "Cache bypassed source identity validation.");
+
+            var fastOriginal = MakeFngWithObject("ProjectTarget.fng", 1f);
+            var fastEdit = MakeFngWithObject("ProjectTarget.fng", 42f);
+            var fastSourcePath = Save("project-source.bun", fastOriginal.Concat(fng).ToArray());
+            var fastProject = ContainerProject.Open(fastSourcePath);
+            var fastSource = fastProject.ReadFng(fastProject.Index.Blocks[0]).Source;
+            var fastEdits = new[] { ContainerProjectFile.CreateEdit(fastSource, fastEdit) };
+            var fastProjectPath = Path.Combine(root, "fast.fengproj");
+            var fastSnapshot = new ContainerProjectSnapshot(fastProject, fastEdits,
+                Array.Empty<ContainerTextureOverride>(), Array.Empty<long>(), null);
+            ContainerProjectFile.Save(fastProjectPath, fastSnapshot);
+            var legacyProjectPath = Path.Combine(root, "legacy.fengproj");
+            File.Copy(fastProjectPath, legacyProjectPath);
+            using (var zip = ZipFile.Open(legacyProjectPath, ZipArchiveMode.Update))
+            using (var manifest = zip.GetEntry("project.json").Open())
+            {
+                var metadata = System.Text.Json.Nodes.JsonNode.Parse(manifest);
+                metadata["Version"] = 1;
+                metadata.AsObject().Remove("Textures");
+                manifest.SetLength(0);
+                JsonSerializer.Serialize(manifest, metadata);
+            }
+            var legacySnapshot = ContainerProjectFile.Load(legacyProjectPath);
+            Check(legacySnapshot.Textures.Count == 0 && legacySnapshot.Edits.Count == 1,
+                "Version 1 project did not load as a texture-less project.");
+            var migratedProjectPath = Path.Combine(root, "legacy-migrated.fengproj");
+            var migratedBaseline = ContainerProjectFile.Save(migratedProjectPath, legacySnapshot);
+            var migrated = ContainerProjectFile.Load(migratedProjectPath);
+            Check(migrated.SourcePath == fastSourcePath && migrated.BasePath == migratedBaseline &&
+                File.Exists(migratedBaseline) && migrated.Edits.Count == 1,
+                "Version 1 project did not migrate to an independent baseline.");
+            var fastOutput = Path.Combine(root, "project-copy.bun");
+            Reject<IOException>(() => ContainerProjectWriteBack.Prepare(fastProjectPath, fastSourcePath),
+                "Accepted original container as a project output.");
+            using (var stale = ContainerProjectWriteBack.Prepare(fastProjectPath, fastOutput))
+            {
+                ContainerProjectFile.Save(fastProjectPath, fastSnapshot with { Tabs = new long[] { 0 }, ActiveTab = 0 });
+                Reject<InvalidDataException>(() => stale.Execute(), "Accepted a project changed after plan creation.");
+                Check(!File.Exists(fastOutput) && !Directory.Exists(stale.LedgerDirectory),
+                    "Stale project plan created output or a ledger.");
+            }
+            using (var operation = ContainerProjectWriteBack.Prepare(fastProjectPath, fastOutput))
+            {
+                Check(operation.Plan.IsExecutable && !operation.Plan.RebuildWithBinary &&
+                    !File.Exists(fastOutput) && !Directory.Exists(operation.LedgerDirectory),
+                    "New-copy preflight selected the wrong route or published files.");
+                var report = operation.Execute();
+                Check(report.Success && report.LedgerComplete && File.ReadAllBytes(fastOutput).SequenceEqual(fastEdit.Concat(fng)) &&
+                    File.ReadAllBytes(fastSourcePath).SequenceEqual(fastOriginal.Concat(fng)) &&
+                    File.ReadAllBytes(report.BackupPath).SequenceEqual(fastOriginal.Concat(fng)) &&
+                    ContainerProjectWriteBack.SavedState(fastProjectPath, fastProject.Index, fastEdits) == "已写回",
+                    "New-copy result, source, backup or restored write-back state differs.");
+                Reject<IOException>(() => ContainerProjectWriteBack.Prepare(fastProjectPath, fastOutput),
+                    "Accepted an existing project output.");
+            }
+
+            var deployOriginal = MakeFngWithObject("DeployTarget.fng", 3f);
+            var deployEdit = MakeFngWithObject("DeployTarget.fng", 99f);
+            var deploySourcePath = Save("deploy-source.bun", deployOriginal.Concat(fng).ToArray());
+            var deployProject = ContainerProject.Open(deploySourcePath);
+            var deploySource = deployProject.ReadFng(deployProject.Index.Blocks[0]).Source;
+            var deployProjectPath = Path.Combine(root, "deploy-project.fengproj");
+            var deployBaseline = ContainerProjectFile.Save(deployProjectPath,
+                new ContainerProjectSnapshot(deployProject,
+                    new[] { ContainerProjectFile.CreateEdit(deploySource, deployEdit) },
+                    Array.Empty<ContainerTextureOverride>(), Array.Empty<long>(), null));
+            File.Delete(deploySourcePath);
+            var deployReopened = ContainerProjectFile.Load(deployProjectPath);
+            Check(deployReopened.Edits.Count == 1 && deployReopened.BasePath == deployBaseline &&
+                File.Exists(deployReopened.BasePath) && !File.Exists(deploySourcePath),
+                "Project could not reopen from its baseline after the deployed source was replaced.");
+            var deployOutput = Path.Combine(root, "deploy-copy.bun");
+            using (var deployWrite = ContainerProjectWriteBack.Prepare(deployProjectPath, deployOutput))
+            {
+                var deployReport = deployWrite.Execute();
+                Check(deployReport.Success && File.ReadAllBytes(deployOutput).SequenceEqual(deployEdit.Concat(fng)),
+                    "Project export after source replacement did not use the baseline.");
+            }
+            File.Delete(deployReopened.BasePath);
+            Reject<ProjectBaselineMissingException>(() => ContainerProjectFile.Load(deployProjectPath),
+                "Missing baseline did not fail with the dedicated error.");
+            var racedPath = Path.Combine(root, "raced.bun");
+            using (var raced = ContainerProjectWriteBack.Prepare(fastProjectPath, racedPath))
+            {
+                Reject<ContainerWriteBackException>(() => raced.Execute(step =>
+                {
+                    if (step == "发布新副本") File.WriteAllText(racedPath, "competing file");
+                }), "A competing creation did not stop publication.");
+                Check(File.ReadAllText(racedPath) == "competing file" &&
+                    WriteBackJournal.Load(raced.LedgerDirectory).Single().Status == WriteBackJournal.StatusFailed,
+                    "New-copy publication replaced a competing file or lost the failed journal.");
+            }
             var invalid = FngContainer.Open(Save("invalid-fng.bun", Block(FngContainer.FngChunkId, new byte[40])));
             Check(invalid.Entries.Single().Storage == FngStorageKind.Invalid, "Malformed FNG was accepted.");
             Check(FngContainer.Open(Save("empty.bun", Array.Empty<byte>())).BlockCount == 0, "Empty container failed.");

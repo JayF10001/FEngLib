@@ -14,6 +14,9 @@ internal sealed class ViewerLayoutState
     public string LeftMode { get; set; } = "tree";
     public bool SimpleTree { get; set; } = true;
     public bool DarkTheme { get; set; }
+    public string[] RecentProjects { get; set; } = Array.Empty<string>();
+    public string[] RecentContainers { get; set; } = Array.Empty<string>();
+    public string[] RecentFiles { get; set; } = Array.Empty<string>();
 
     public ViewerLayoutState Clone() => new()
     {
@@ -22,7 +25,10 @@ internal sealed class ViewerLayoutState
         RightCollapsed = RightCollapsed,
         PreviewAspect = PreviewAspect,
         LeftMode = LeftMode
-        ,SimpleTree = SimpleTree, DarkTheme = DarkTheme
+        ,SimpleTree = SimpleTree, DarkTheme = DarkTheme,
+        RecentProjects = RecentProjects ?? Array.Empty<string>(),
+        RecentContainers = RecentContainers ?? Array.Empty<string>(),
+        RecentFiles = RecentFiles ?? Array.Empty<string>()
     };
 }
 

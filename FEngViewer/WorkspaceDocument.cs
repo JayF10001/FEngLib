@@ -2,9 +2,19 @@ using System;
 using System.IO;
 using FEngLib.Packages;
 using FEngLib.Editing;
+using FEngLib.Assets;
 using System.Drawing;
 
 namespace FEngViewer;
+
+internal sealed class PreviewPlaybackState
+{
+    public uint? ObjectGuid { get; init; }
+    public uint? ScriptId { get; init; }
+    public bool WholePackage { get; init; }
+    public int Elapsed { get; init; }
+    public bool Playing { get; init; }
+}
 
 /// <summary>
 /// One opened FNG document. It owns its model, unsaved state and editor state, so switching
@@ -12,6 +22,23 @@ namespace FEngViewer;
 /// </summary>
 internal sealed class WorkspaceDocument
 {
+    private readonly Func<ContainerFngContent, Package> readContainerPackage;
+    internal readonly record struct ModelState(Package Package, PackageEditHistory History, int Version,
+        bool Dirty, string Error, string Caption, PreviewPlaybackState Preview);
+
+    internal ModelState CaptureModelState() => new(Package, History, ModelVersion, IsDirty, LoadError, CaptionName, PreviewState);
+
+    internal void RestoreModelState(ModelState state)
+    {
+        Package = state.Package;
+        History = state.History;
+        ModelVersion = state.Version;
+        IsDirty = state.Dirty;
+        LoadError = state.Error;
+        CaptionName = state.Caption;
+        PreviewState = state.Preview;
+    }
+
     public WorkspaceDocument(string path, bool isJson)
     {
         SourcePath = System.IO.Path.GetFullPath(path);
@@ -19,6 +46,20 @@ internal sealed class WorkspaceDocument
         IsJson = isJson;
         CaptionName = DeriveCaptionName(FilePath);
     }
+
+    public WorkspaceDocument(ContainerProject project, ContainerBlock block, Func<ContainerFngContent, Package> reader)
+    {
+        Project = project;
+        Block = block;
+        readContainerPackage = reader;
+        SourcePath = project.Index.SourcePath;
+        CaptionName = block.PackageName ?? $"FNG 0x{block.Offset:X}";
+    }
+
+    public ContainerProject Project { get; }
+    public ContainerBlock Block { get; }
+    public ContainerFngSource ContainerSource { get; private set; }
+    public string Location => Project == null ? FilePath : $"{SourcePath} @ 0x{Block.Offset:X}";
 
     /// <summary>Where the document came from; never changes, so preview textures stay where they were.</summary>
     public string SourcePath { get; }
@@ -41,6 +82,7 @@ internal sealed class WorkspaceDocument
     public float CanvasZoom { get; set; }
     public PointF CanvasPan { get; set; }
     public bool CanvasFit { get; set; } = true;
+    public PreviewPlaybackState PreviewState { get; set; }
     public uint? SelectedGuid { get; set; }
     public string[] ExpandedTreeKeys { get; set; } = Array.Empty<string>();
     public string TopTreeKey { get; set; }
@@ -64,8 +106,8 @@ internal sealed class WorkspaceDocument
     {
         get
         {
-            var text = FilePath + (IsDirty ? "（未保存）" : "");
-            if (!string.Equals(SourcePath, FilePath, StringComparison.OrdinalIgnoreCase))
+            var text = Location + (IsDirty ? "（未保存）" : "");
+            if (Project == null && !string.Equals(SourcePath, FilePath, StringComparison.OrdinalIgnoreCase))
                 text += "\n来源: " + SourcePath;
             if (!string.IsNullOrEmpty(LoadError))
                 text += "\n读取失败: " + LoadError;
@@ -82,6 +124,7 @@ internal sealed class WorkspaceDocument
         get
         {
             var fromSource = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SourcePath) ?? "", "textures");
+            if (Project != null) return fromSource;
             if (Directory.Exists(fromSource)) return fromSource;
             var fromCurrent = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(FilePath) ?? "", "textures");
             return Directory.Exists(fromCurrent) ? fromCurrent : fromSource;
@@ -90,7 +133,7 @@ internal sealed class WorkspaceDocument
 
     public bool MatchesPath(string path)
     {
-        if (string.IsNullOrWhiteSpace(path)) return false;
+        if (Project != null || string.IsNullOrWhiteSpace(path)) return false;
         try
         {
             return string.Equals(FilePath, System.IO.Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase);
@@ -105,10 +148,11 @@ internal sealed class WorkspaceDocument
     public Package EnsureLoaded(Func<string, bool, Package> loader)
     {
         if (Package != null) return Package;
-        if (loader == null) throw new ArgumentNullException(nameof(loader));
+        // Container documents use readContainerPackage; only loose files need the external loader.
+        if (loader == null && Project == null) throw new ArgumentNullException(nameof(loader));
         try
         {
-            var package = loader(FilePath, IsJson) ?? throw new InvalidDataException("解析器没有返回包模型。");
+            var package = ReadPackage(loader);
             Package = package;
             History = new PackageEditHistory(package);
             ModelVersion++;
@@ -123,6 +167,20 @@ internal sealed class WorkspaceDocument
         }
     }
 
+    public Package ReadPackage(Func<string, bool, Package> loader)
+    {
+        if (Project == null)
+        {
+            if (loader == null) throw new ArgumentNullException(nameof(loader));
+            return loader(FilePath, IsJson) ?? throw new InvalidDataException("解析器没有返回包模型。");
+        }
+
+        var content = Project.ReadFng(Block);
+        var package = readContainerPackage(content) ?? throw new InvalidDataException("解析器没有返回包模型。");
+        ContainerSource = content.Source;
+        return package;
+    }
+
     /// <summary>Swaps in a freshly parsed model, e.g. after Reload; the dirty flag is cleared by design.</summary>
     public void ReplacePackage(Package package)
     {
@@ -130,6 +188,7 @@ internal sealed class WorkspaceDocument
         History = new PackageEditHistory(package);
         ModelVersion++;
         IsDirty = false;
+        PreviewState = null;
         LoadError = null;
         ApplyPackageName(package);
     }
@@ -147,9 +206,14 @@ internal sealed class WorkspaceDocument
     {
         FilePath = System.IO.Path.GetFullPath(path);
         IsJson = isJson;
-        IsDirty = false;
-        History?.MarkSaved();
+        MarkEditsSaved();
         CaptionName = DeriveCaptionName(FilePath);
+    }
+
+    public void MarkEditsSaved()
+    {
+        History?.MarkSaved();
+        IsDirty = false;
     }
 
     /// <summary>Drops the model of a clean document so the next activation reads the new file.</summary>

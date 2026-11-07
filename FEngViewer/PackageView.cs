@@ -1,5 +1,6 @@
 using CommandLine;
 using FEngLib;
+using FEngLib.Editing;
 using FEngLib.Messaging;
 using FEngLib.Objects;
 using FEngLib.Packages;
@@ -27,8 +28,6 @@ public partial class PackageView : Form
 	internal Package _currentPackage;
 	internal RenderTree _currentRenderTree;
 	private PackageViewExtensions _packageViewExtensions;
-
-	private TreeNode _rootNode;
 
 	public PackageView()
 	{
@@ -63,6 +62,7 @@ public partial class PackageView : Form
 		imageList.Images.Add("TreeItem_GenericObject", Resources.TreeItem_GenericObject);
 		treeView1.ImageList = imageList;
 		InitializeEditorWorkbench();
+		InitializeTextureResolver();
 		WindowState = FormWindowState.Maximized;
 	}
 
@@ -83,7 +83,13 @@ public partial class PackageView : Form
 
 		if (!File.Exists(path))
 		{
-			MessageBox.Show(this, $"找不到文件：\n{path}", "FEngViewer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+			MessageBox.Show(this, $"找不到文件：\n{path}", "FEngEditor", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+			return;
+		}
+
+		if (IsContainerPath(path) || IsProjectPath(path))
+		{
+			OpenContainerProject(path);
 			return;
 		}
 
@@ -113,12 +119,9 @@ public partial class PackageView : Form
 		{
 		treeView1.Nodes.Clear();
 
-		_rootNode = treeView1.Nodes.Add(package.Name);
-		_rootNode.Name = "package";
-
 		if (!_simpleTree)
 		{
-		var resourceListNode = _rootNode.Nodes.Add("资源请求");
+		var resourceListNode = treeView1.Nodes.Add("资源请求");
 		resourceListNode.Name = "resources";
 		resourceListNode.ImageKey = resourceListNode.SelectedImageKey = "TreeItem_ResourceList";
 
@@ -141,7 +144,7 @@ public partial class PackageView : Form
 			};
 		}
 
-		var messageResponseListNode = _rootNode.Nodes.Add("消息响应");
+		var messageResponseListNode = treeView1.Nodes.Add("消息响应");
 		messageResponseListNode.Name = "messages";
 		messageResponseListNode.ImageKey = messageResponseListNode.SelectedImageKey = "TreeItem_Message";
 		foreach (var messageResponses in package.MessageResponses)
@@ -152,7 +155,7 @@ public partial class PackageView : Form
 			messageResponseNode.Tag = messageResponses;
 		}
 
-		var messageDefinitionsListNode = _rootNode.Nodes.Add("消息定义");
+		var messageDefinitionsListNode = treeView1.Nodes.Add("消息定义");
 		messageDefinitionsListNode.Name = "definitions";
 		messageDefinitionsListNode.ImageKey = messageDefinitionsListNode.SelectedImageKey = "TreeItem_Message";
 		foreach (var messageDefinitions in package.MessageDefinitions)
@@ -162,7 +165,7 @@ public partial class PackageView : Form
 			messageDefinitionsNode.Tag = messageDefinitions;
 		}
 
-		var messageTargetsNodeList = _rootNode.Nodes.Add("消息目标");
+		var messageTargetsNodeList = treeView1.Nodes.Add("消息目标");
 		messageTargetsNodeList.Name = "targets";
 		messageTargetsNodeList.ImageKey = messageTargetsNodeList.SelectedImageKey = "TreeItem_Message";
 		foreach (var messageTargetsLists in package.MessageTargetLists)
@@ -174,15 +177,10 @@ public partial class PackageView : Form
 		}
 		}
 
-		//var objectListNode = rootNode.Nodes.Add("Objects");
-		//objectListNode.ImageKey = "TreeItem_ObjectList";
-		ApplyObjectsToTreeNodes(feObjectNodes, _rootNode.Nodes);
+		ApplyObjectsToTreeNodes(feObjectNodes, treeView1.Nodes);
 
-		_rootNode.Expand();
-		// treeView1.ExpandAll();
-
-		if (_expandTreeButton != null) _expandTreeButton.Text = "⊟";
-		treeView1.SelectedNode = _rootNode;
+		if (_expandTreeButton != null) _expandTreeButton.Text = "⊞";
+		treeView1.SelectedNode = null;
 		}
 		finally { treeView1.EndUpdate(); _restoringTree = restoreFlag; }
 	}
@@ -344,16 +342,18 @@ public partial class PackageView : Form
 	}
 
 	private void SavePackageToChunk(Package package, string path)
-	{
-		using var tms = new MemoryStream();
-		using var tbw = new BinaryWriter(tms);
-		new FrontendChunkWriter(package).Write(tbw);
-		tms.Position = 0;
-		using var bw = new BinaryWriter(File.Create(path));
+		=> File.WriteAllBytes(path, EncodePackageChunk(package));
 
+	private static byte[] EncodePackageChunk(Package package)
+	{
+		using var output = new MemoryStream();
+		using var bw = new BinaryWriter(output);
 		bw.Write(0x30203);
-		bw.Write((uint)tms.Length);
-		tms.CopyTo(bw.BaseStream);
+		bw.Write(0u);
+		new FrontendChunkWriter(package).Write(bw);
+		output.Position = 4;
+		bw.Write(checked((uint)(output.Length - 8)));
+		return output.ToArray();
 	}
 
 	private void SavePackageToJson(Package package, string path)
@@ -403,18 +403,26 @@ public partial class PackageView : Form
 		return count;
 	}
 
+	private void ClearObjectSelection()
+	{
+		treeView1.SelectedNode = null;
+		viewOutput.SelectedNode = null;
+		if ((_boundDocument ?? ActiveDocument) is { } owner) owner.SelectedGuid = null;
+		LblItemIndex.Text = "索引：00000";
+		LblChildsCount.Text = "子对象：" + (_currentPackage?.Objects.Count(x => x.Parent == null) ?? 0).ToString("D5")
+			+ " | 总计：" + (_currentPackage?.Objects.Count ?? 0);
+		SetPropertyTarget(null);
+		treeView1.Invalidate();
+	}
+
 	private void treeView1_AfterSelect(object sender, TreeViewEventArgs e)
 	{
 		if (_restoringTree || _currentPackage == null)
 			return;
 
-		if (e.Node == _rootNode && _rootNode != null)
+		if (e.Node == null)
 		{
-			viewOutput.SelectedNode = null;
-			if (!_restoringTree && (_boundDocument ?? ActiveDocument) is { } owner) owner.SelectedGuid = null;
-			LblChildsCount.Text = "子对象：" + _currentPackage.Objects.Where(x => x.Parent == null).Count().ToString("D5") + " | 总计：" + CountChildren(null);
-			// The package root has no editable object, so show the panel's empty state.
-			SetPropertyTarget(null);
+			ClearObjectSelection();
 		}
 		else if (e.Node?.Tag is RenderTreeNode viewNode)
 		{
@@ -470,6 +478,7 @@ public partial class PackageView : Form
 
 	private void viewOutput_MouseClick(object sender, MouseEventArgs e)
 	{
+		if (_boundDocument == null) return;
 		if (e.Button == MouseButtons.Right)
 		{
 			var ctxPoint = new Point(e.X, e.Y);
@@ -546,8 +555,8 @@ public partial class PackageView : Form
 		{
 			viewOutput.SelectedNode = null;
 		}
-		if (treeView1.SelectedNode == _rootNode)
-			treeView1_AfterSelect(treeView1, new TreeViewEventArgs(_rootNode));
+		if (treeView1.SelectedNode == null)
+			ClearObjectSelection();
 		Render();
 		if (!string.IsNullOrEmpty(topKey))
 		{
@@ -658,16 +667,47 @@ public partial class PackageView : Form
 
 	private void deleteToolStripMenuItem_Click(object sender, EventArgs e)
 	{
-		if (treeView1.SelectedNode?.Tag is not RenderTreeNode node)
+		var selectedObject = SelectedObjectNode()?.GetObject();
+
+		if (selectedObject is null || _currentPackage == null)
 			return;
 
-		var selectedObject = node.GetObject();
-
-		if (selectedObject is null)
+		ObjectReferenceReport report;
+		try { report = ObjectDeletion.Scan(_currentPackage, selectedObject); }
+		catch (Exception error)
+		{
+			MessageBox.Show(this, error.Message, "无法检查引用", MessageBoxButtons.OK, MessageBoxIcon.Warning);
 			return;
+		}
+
+		var lines = new List<string>();
+		if (report.MessageTargetCount > 0) lines.Add($"消息目标引用：{report.MessageTargetCount}");
+		if (report.MessageResponseCount > 0) lines.Add($"消息响应引用：{report.MessageResponseCount}");
+		if (report.ScriptEventCount > 0) lines.Add($"脚本事件引用：{report.ScriptEventCount}");
+
+		var removeScriptEvents = false;
+		if (report.Total > 0)
+		{
+			var text = $"要删除的对象仍被引用：\n\n{string.Join("\n", lines)}\n\n" +
+				(report.ScriptEventCount > 0
+					? "继续会移除这些消息/脚本事件引用，可能改变动画或消息行为。"
+					: "继续会清理这些消息引用，避免游戏闪退。");
+			var answer = MessageBox.Show(this, text, "删除有引用的对象",
+				MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+			if (answer != DialogResult.Yes) return;
+			removeScriptEvents = report.ScriptEventCount > 0;
+		}
 
 		var parentKey = PackageViewExtensions.GetObjectTreeKey(selectedObject.Parent);
-		_packageViewExtensions.DeleteObject(selectedObject);
+		try
+		{
+			ObjectDeletion.Delete(_currentPackage, selectedObject, removeScriptEvents);
+		}
+		catch (Exception error)
+		{
+			MessageBox.Show(this, error.Message, "无法删除", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+			return;
+		}
 		CurrentPackageWasModified(parentKey);
 	}
 
@@ -748,82 +788,72 @@ public partial class PackageView : Form
 
 	private void cutToolStripMenuItem_Click(object sender, EventArgs e)
 	{
-		if (treeView1.SelectedNode?.Tag is not RenderTreeNode node)
+		var selectedObject = SelectedObjectNode()?.GetObject();
+		if (selectedObject is null)
 			return;
 
-		_packageViewExtensions.ObjectSelected = node.GetObject();
+		_packageViewExtensions.ObjectSelected = selectedObject;
 		_packageViewExtensions.ShouldCopyObject = false;
+		MarkCutObject(selectedObject);
+		_statusLeft.Text = "已剪切对象（树中标 ✂）；选择目标组后按 Ctrl+V。";
 	}
 
 	private void copyToolStripMenuItem_Click(object sender, EventArgs e)
 	{
-		if (treeView1.SelectedNode?.Tag is not RenderTreeNode node)
+		var selectedObject = SelectedObjectNode()?.GetObject();
+		if (selectedObject is null)
 			return;
 
-		_packageViewExtensions.ObjectSelected = node.GetObject();
+		ClearCutMarker();
+		_packageViewExtensions.ObjectSelected = selectedObject;
 		_packageViewExtensions.ShouldCopyObject = true;
+		_statusLeft.Text = "已复制对象；选择目标组后按 Ctrl+V。";
 	}
 
 	private void pasteToolStripMenuItem_Click(object sender, EventArgs e)
 	{
-		if (_packageViewExtensions.ObjectSelected is null)
+		var clipboard = _packageViewExtensions.ObjectSelected;
+		if (clipboard is null || _currentPackage is null)
 			return;
 
-		if (treeView1.SelectedNode?.Tag is not RenderTreeNode node)
-			return;
-
-		var selectedObject = node.GetObject();
-
-		if (selectedObject is null)
-			return;
-
-		var treeKey = PackageViewExtensions.GetObjectTreeKey(selectedObject);
+		var targetNode = SelectedObjectNode();
+		var target = targetNode?.GetObject();
+		var parent = target is Group ? target : target?.Parent;
 
 		if (_packageViewExtensions.ShouldCopyObject)
 		{
-			var lastChild = _packageViewExtensions.FindLastChild(selectedObject);
-			var newIndex = _currentPackage.Objects.IndexOf(lastChild) + 1;
-			var parent = selectedObject is Group && selectedObject == lastChild ? selectedObject : selectedObject.Parent;
-
-			var newObject = _packageViewExtensions.CopyObject(_packageViewExtensions.ObjectSelected, parent, newIndex);
-
-			if (newObject is null)
+			if (ReferenceEquals(clipboard, target))
 				return;
-
-			AppService.Instance.HashResolver.AddUserKey(newObject.Name, newObject.NameHash);
-			treeKey = PackageViewExtensions.GetObjectTreeKey(newObject);
-		}
-		else
-		{
-			if (_packageViewExtensions.ObjectSelected == selectedObject)
+			PerformEdit("粘贴对象", () =>
 			{
-				_packageViewExtensions.ObjectSelected = null;
-				return;
-			}
-
-			treeKey = PackageViewExtensions.GetObjectTreeKey(_packageViewExtensions.ObjectSelected);
-			var lastChild = _packageViewExtensions.FindLastChild(selectedObject);
-			var newIndex = _currentPackage.Objects.IndexOf(lastChild) + 1;
-			var oldIndex = _currentPackage.Objects.IndexOf(_packageViewExtensions.ObjectSelected);
-
-			if (oldIndex == newIndex)
-				return;
-
-			var newParent = selectedObject is Group && selectedObject == lastChild ? selectedObject : selectedObject.Parent;
-			for (var ancestor = newParent; ancestor != null; ancestor = ancestor.Parent)
-				if (ReferenceEquals(ancestor, _packageViewExtensions.ObjectSelected))
-				{
-					MessageBox.Show(this, "不能把组移动到自己的子组中。", "无法移动");
-					return;
-				}
-			_packageViewExtensions.ObjectSelected.Parent = newParent;
-			_packageViewExtensions.MoveItem(oldIndex, newIndex);
-			_packageViewExtensions.MoveChildren(_packageViewExtensions.ObjectSelected);
-
-			_packageViewExtensions.ObjectSelected = null;
+				var index = parent == null
+					? _currentPackage.Objects.Count
+					: _currentPackage.Objects.IndexOf(_packageViewExtensions.FindLastChild(parent)) + 1;
+				var copy = _packageViewExtensions.CopyObject(clipboard, parent, index);
+				if (copy is null) throw new InvalidOperationException("无法粘贴对象（名称冲突或资源无效）。");
+				AppService.Instance.HashResolver.AddUserKey(copy.Name, copy.NameHash);
+				(_boundDocument ?? ActiveDocument)!.SelectedGuid = copy.Guid;
+			});
+			ClearCutMarker();
+			return;
 		}
 
-		CurrentPackageWasModified(treeKey);
+		if (ReferenceEquals(clipboard, target))
+		{
+			_statusLeft.Text = "已剪切对象；请选择目标组或根级对象，再按 Ctrl+V。";
+			return;
+		}
+		if (ReferenceEquals(clipboard.Parent, parent))
+		{
+			_statusLeft.Text = "对象已经在目标组中。";
+			_packageViewExtensions.ObjectSelected = null;
+			ClearCutMarker();
+			return;
+		}
+
+		MoveObjectToGroup(clipboard, parent, "剪切粘贴");
+		_packageViewExtensions.ObjectSelected = null;
+		ClearCutMarker();
 	}
 
 

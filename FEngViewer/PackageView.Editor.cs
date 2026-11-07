@@ -7,6 +7,7 @@ using System.Windows.Forms;
 using FEngLib.Editing;
 using FEngLib.Objects;
 using FEngRender.Data;
+using FEngRender.Utils;
 
 namespace FEngViewer;
 
@@ -24,6 +25,7 @@ public partial class PackageView
     private ToolStripButton _packagePlayButton,_packagePauseButton,_packageResetButton;
     private ToolStripSeparator _editorToolSeparator;
     private readonly List<ToolStripItem> _packagePreviewTools=new();
+    private string _cutTreeKey;
 
     private void InitializeEditorWorkbench()
     {
@@ -40,19 +42,21 @@ public partial class PackageView
                 TextFormatFlags.NoPrefix|TextFormatFlags.VerticalCenter);
         };
         EditorTheme.Dark=ViewerSettings.Load().DarkTheme;
-        _inspector.EditRequested+=PerformEdit;
+        _inspector.EditRequested+=PerformPropertyEdit;
         _inspector.PlayRequested+=(obj,id)=>
         {if(viewOutput.IsPreviewOf(obj,id)&&!viewOutput.PreviewPlaying)viewOutput.ResumePreview();else viewOutput.StartPreview(obj,id);};
         _inspector.PauseRequested+=()=>viewOutput.PausePreview();
         _inspector.ResetRequested+=()=>{viewOutput.ResetPreview();_inspector.RefreshGeometry();};
+        _inspector.TextureSourceRequested+=(obj,request)=>ShowTextureSource(obj,request);
+        _inspector.TextureReplaceRequested+=(obj,request)=>ShowTextureReplace(obj,request);
         viewOutput.ObjectPicked+=node=>
         {
-            if(node==null) {treeView1.SelectedNode=_rootNode;viewOutput.SelectedNode=null;return;}
+            if (_boundDocument == null) return;
+            if(node==null) {ClearObjectSelection();return;}
             viewOutput.SelectedNode=node;
             var found=treeView1.Nodes.Find(PackageViewExtensions.GetObjectTreeKey(node.GetObject()),true).FirstOrDefault();
             if(found!=null)
             {
-                SetLeftMode(WorkspaceLeftMode.ObjectTree);
                 var wasVisible=found.IsVisible;
                 treeView1.SelectedNode=found;
                 found.EnsureVisible();
@@ -72,7 +76,10 @@ public partial class PackageView
             if(document?.History==null)return;
             if(!commit) document.History.CancelPending();
             else if(document.History.Commit("画布变换"))
-                CurrentPackageWasModified(PackageViewExtensions.GetObjectTreeKey(obj));
+            {
+                _workspace.MarkDirty(document);
+                RefreshAfterInPlaceEdit(document);
+            }
         };
         viewOutput.TransformUpdated+=()=>_inspector.RefreshGeometry();
         viewOutput.EditorStatus+=message=>{_statusLeft.Text=message;};
@@ -90,18 +97,52 @@ public partial class PackageView
         _undoItem=new ToolStripMenuItem("撤销",null,(_,_)=>HistoryStep(false));
         _redoItem=new ToolStripMenuItem("重做",null,(_,_)=>HistoryStep(true));
         _undoItem.ShortcutKeyDisplayString="Ctrl+Z";_redoItem.ShortcutKeyDisplayString="Ctrl+Y";
-        edit.DropDownItems.AddRange(new ToolStripItem[]{_undoItem,_redoItem});
+        ToolStripMenuItem ShortcutItem(string text,string display,EventHandler handler)
+        {
+            var item=new ToolStripMenuItem(text,null,handler){ShortcutKeyDisplayString=display};
+            return item;
+        }
+        edit.DropDownItems.AddRange(new ToolStripItem[]
+        {
+            _undoItem,_redoItem,new ToolStripSeparator(),
+            ShortcutItem("复制对象","Ctrl+C",copyToolStripMenuItem_Click),
+            ShortcutItem("剪切对象","Ctrl+X",cutToolStripMenuItem_Click),
+            ShortcutItem("粘贴对象","Ctrl+V",pasteToolStripMenuItem_Click),
+            ShortcutItem("删除对象","Backspace",deleteToolStripMenuItem_Click)
+        });
+        edit.DropDownOpening+=(_,_)=>
+        {
+            var hasObject=SelectedObjectNode()!=null;
+            foreach(ToolStripItem item in edit.DropDownItems.Cast<ToolStripItem>().Skip(2))
+                if(item is not ToolStripSeparator) item.Enabled=hasObject;
+        };
+        // The context menu used to own real ShortcutKeys; that steals Ctrl+C/V/X from text
+        // fields. ProcessCmdKey handles them only outside text editing, so keep display-only.
+        copyToolStripMenuItem.ShortcutKeys=Keys.None;copyToolStripMenuItem.ShortcutKeyDisplayString="Ctrl+C";
+        cutToolStripMenuItem.ShortcutKeys=Keys.None;cutToolStripMenuItem.ShortcutKeyDisplayString="Ctrl+X";
+        pasteToolStripMenuItem.ShortcutKeys=Keys.None;pasteToolStripMenuItem.ShortcutKeyDisplayString="Ctrl+V";
+        deleteToolStripMenuItem.ShortcutKeys=Keys.None;deleteToolStripMenuItem.ShortcutKeyDisplayString="Backspace";
         var objects=new ToolStripMenuItem("对象(&O)");
-        objects.DropDownItems.Add(CreateMenuItem("新建对象…",Keys.Control|Keys.N,(_,_)=>CreateObject()));
+        var newObjectItem=CreateMenuItem("新建对象…",Keys.Control|Keys.N,(_,_)=>CreateObject());
+        newObjectItem.ShortcutKeyDisplayString="Ctrl+N";objects.DropDownItems.Add(newObjectItem);
         objects.DropDownItems.Add(CreateMenuItem("复制对象…",Keys.None,duplicateToolStripMenuItem_Click));
         objects.DropDownItems.Add(CreateMenuItem("批量复制…",Keys.None,duplicateUntilToolStripMenuItem_Click));
-        objects.DropDownItems.Add(CreateMenuItem("重命名…",Keys.None,renameToolStripMenuItem_Click));
-        objects.DropDownItems.Add(CreateMenuItem("删除",Keys.None,deleteToolStripMenuItem_Click));
+        var renameItem=CreateMenuItem("重命名…",Keys.None,renameToolStripMenuItem_Click);
+        renameItem.ShortcutKeyDisplayString="Ctrl+R";objects.DropDownItems.Add(renameItem);
+        var deleteItem=CreateMenuItem("删除",Keys.None,deleteToolStripMenuItem_Click);
+        deleteItem.ShortcutKeyDisplayString="Backspace";objects.DropDownItems.Add(deleteItem);
+        objects.DropDownItems.Add(new ToolStripSeparator());
+        objects.DropDownItems.Add(ShortcutItem("复制对象到剪贴板","Ctrl+C",copyToolStripMenuItem_Click));
+        objects.DropDownItems.Add(ShortcutItem("剪切对象","Ctrl+X",cutToolStripMenuItem_Click));
+        objects.DropDownItems.Add(ShortcutItem("粘贴对象","Ctrl+V",pasteToolStripMenuItem_Click));
+        objects.DropDownItems.Add(new ToolStripSeparator());
+        objects.DropDownItems.Add(CreateMenuItem("移动到组…",Keys.None,(_,_)=>MoveSelectedObjectToGroup()));
         objects.DropDownOpening+=(_,_)=>
         {
             objects.DropDownItems[0].Enabled=_currentPackage!=null;
+            var hasObject=SelectedObjectNode()!=null;
             foreach(ToolStripItem item in objects.DropDownItems.Cast<ToolStripItem>().Skip(1))
-                item.Enabled=treeView1.SelectedNode?.Tag is RenderTreeNode;
+                item.Enabled=hasObject;
         };
         var view=new ToolStripMenuItem("视图(&V)");
         var treeMode=new ToolStripMenuItem("简洁对象树"){CheckOnClick=true,Checked=_simpleTree};
@@ -110,10 +151,13 @@ public partial class PackageView
         dark.CheckedChanged+=(_,_)=>{EditorTheme.Dark=dark.Checked;ApplyEditorTheme();SaveLayoutState();};view.DropDownItems.Add(dark);
         view.DropDownItems.Add(CreateMenuItem("适应窗口",Keys.Control|Keys.D0,(_,_)=>viewOutput.FitToWindow()));
         view.DropDownItems.Add(CreateMenuItem("100%",Keys.Control|Keys.D1,(_,_)=>viewOutput.SetZoom(1)));
+        view.DropDownItems.Add(new ToolStripSeparator());
+        view.DropDownItems.Add(CreateMenuItem("贴图来源…",Keys.None,(_,_)=>ConfigureTextureSources()));
         var help=new ToolStripMenuItem("帮助(&H)");
         help.DropDownItems.Add("操作说明",null,(_,_)=>MessageBox.Show(this,
             "滚轮：鼠标中心缩放；中键：平移；Alt+点击：轮换重叠对象\n"+
             "V/W/R/E/H：选择/移动/缩放/旋转/平移；方向键：移动 1，Shift：10\n"+
+            "Ctrl+C/X/V：复制/剪切/粘贴；Backspace：删除；对象树可直接拖到目标组\n"+
             "角点等比缩放，边点单轴缩放；Shift+旋转：15°吸附\n"+
             "Esc：取消拖动或输入；Ctrl+Z/Y：撤销/重做\n"+
             "布局变换同步作用于全部已有脚本。开始编辑会回到 INIT 第 0 帧。\n"+
@@ -122,7 +166,13 @@ public partial class PackageView
         BuildCanvasTools();
         var createContext=new ToolStripMenuItem("新建对象…",null,(_,_)=>CreateObject());
         objectContextMenu.Items.Insert(0,createContext);
+        objectContextMenu.Items.Add(CreateMenuItem("移动到组…",Keys.None,(_,_)=>MoveSelectedObjectToGroup()));
         objectContextMenu.Opening+=(_,_)=>EditorTheme.Apply(objectContextMenu);
+        treeView1.AllowDrop=true;
+        treeView1.ItemDrag+=TreeItemDrag;
+        treeView1.DragEnter+=TreeDragEnter;
+        treeView1.DragOver+=TreeDragOver;
+        treeView1.DragDrop+=TreeDragDrop;
         KeyPreview=true;
         ApplyEditorTheme();UpdateHistoryButtons();
     }
@@ -131,7 +181,7 @@ public partial class PackageView
         _canvasTools=new ToolStrip{Dock=DockStyle.Top,GripStyle=ToolStripGripStyle.Hidden,AutoSize=true,
             CanOverflow=false,LayoutStyle=ToolStripLayoutStyle.Flow,Padding=new Padding(4,3,4,3)};
         ((FlowLayoutSettings)_canvasTools.LayoutSettings).WrapContents=true;
-        _packagePlayButton=new ToolStripButton("全体预览 30 秒",null,(_,_)=>viewOutput.StartPackagePreview(_currentPackage));
+        _packagePlayButton=new ToolStripButton("全体预览 30 秒",null,(_,_)=>viewOutput.StartPackagePreview(DisplayedPackage));
         _packagePauseButton=new ToolStripButton("暂停",null,(_,_)=>
         {if(viewOutput.PreviewPlaying)viewOutput.PausePreview();else viewOutput.ResumePreview();});
         _packageResetButton=new ToolStripButton("初始布局",null,(_,_)=>viewOutput.ResetPreview());
@@ -170,11 +220,16 @@ public partial class PackageView
         foreach(var item in _toolButtons)item.Visible=!files;
         if(_editorToolSeparator!=null)_editorToolSeparator.Visible=!files;
         _packagePlayButton.Text=viewOutput.PackagePreviewActive?"重新预览 30 秒":"全体预览 30 秒";
-        _packagePlayButton.Enabled=_currentPackage!=null;
+        _packagePlayButton.Enabled=DisplayedPackage!=null;
         _packagePauseButton.Enabled=viewOutput.PackagePreviewActive;
         _packagePauseButton.Text=viewOutput.PreviewPlaying?"暂停":"继续";
         _packageResetButton.Enabled=viewOutput.PackagePreviewActive;
         _packagePlayButton.ToolTipText="每个对象播放一个展示型脚本；隐藏、离场等脚本不自动播放。";
+        if (_workspacePause != null)
+        {
+            _workspacePause.Enabled = viewOutput.PackagePreviewActive;
+            _workspacePause.Text = viewOutput.PreviewPlaying ? "暂停" : "继续";
+        }
     }
     private void SetCanvasTool(CanvasTool tool)
     {viewOutput.CancelInteraction();viewOutput.ResetPreview();viewOutput.Tool=tool;foreach(var b in _toolButtons)b.Checked=Equals(b.Tag,tool);}
@@ -207,8 +262,55 @@ public partial class PackageView
             MessageBox.Show(this,ex.Message,"无法完成编辑",MessageBoxButtons.OK,MessageBoxIcon.Warning);
         }
     }
+
+    /// <summary>
+    /// Ordinary inspector edits only change one object's data/flags. Re-evaluating the existing
+    /// render tree is enough; rebuilding the tree and property panel loses focus, scroll and makes
+    /// every checkbox click look like a refresh.
+    /// </summary>
+    private void PerformPropertyEdit(string label,Action mutation)
+    {
+        var document=_boundDocument ?? ActiveDocument;
+        if(document?.History==null)return;
+        var history=document.History;
+        try
+        {
+            viewOutput.ResetPreview();
+            mutation();
+            history.Commit(label);
+            _workspace.MarkDirty(document);
+            RefreshAfterInPlaceEdit(document, label.Contains("资源",StringComparison.Ordinal));
+        }
+        catch(Exception ex)
+        {
+            history.CancelPending();viewOutput.PrepareLayout();
+            MessageBox.Show(this,ex.Message,"无法完成编辑",MessageBoxButtons.OK,MessageBoxIcon.Warning);
+        }
+    }
+
+    /// <summary>Re-evaluate the current tree and repaint without rebuilding tree nodes or controls.</summary>
+    private void RefreshAfterInPlaceEdit(WorkspaceDocument document,bool refreshInspector=false)
+    {
+        RenderGeometry.Prepare(_currentRenderTree);
+        RefreshSelectedTreeNodeText();
+        Render();
+        SetFormDetails();
+        if(refreshInspector)_inspector?.RefreshAll();
+    }
+
+    private void RefreshSelectedTreeNodeText()
+    {
+        if(treeView1.SelectedNode?.Tag is not RenderTreeNode node)return;
+        var obj=node.GetObject();
+        var text=PackageViewExtensions.GetObjectText(obj)
+            +(obj.Flags.HasFlag(ObjectFlags.Invisible)?"（隐藏）":"");
+        if(treeView1.SelectedNode.Text==text)return;
+        treeView1.SelectedNode.Text=text;
+        treeView1.Invalidate();
+    }
     private void HistoryStep(bool redo)
     {
+        if (ActiveDocument == null) return;
         ValidateChildren();viewOutput.CancelInteraction();viewOutput.ResetPreview();
         var doc=ActiveDocument;if(doc?.History==null)return;
         if(!(redo?doc.History.Redo():doc.History.Undo()))return;
@@ -221,7 +323,7 @@ public partial class PackageView
     {
         if(_undoItem==null)return;
         var h=ActiveDocument?.History;
-        if(_canvasTools!=null)_canvasTools.Enabled=ActiveDocument?.Package!=null;
+        if(_canvasTools!=null)_canvasTools.Enabled=DisplayedPackage!=null;
         UpdatePackagePreviewControls();
         _undoItem.Enabled=h?.CanUndo==true;_redoItem.Enabled=h?.CanRedo==true;
         _undoItem.Text="撤销"+(h?.CanUndo==true?" · "+h.UndoLabel:"");
@@ -263,41 +365,56 @@ public partial class PackageView
     private void ApplyEditorTheme()
     {
         EditorTheme.Apply(this);EditorTheme.Apply(objectContextMenu);EditorTheme.Apply(scriptContextMenu);EditorTheme.Apply(viewerContextMenu);
+        ApplyStartPageTheme();
         if(_workspaceMenu!=null)EditorTheme.Apply(_workspaceMenu);
         _tabBar?.Invalidate();
         SetLeftMode(_leftMode);
     }
-    private bool _gridRefreshQueued;
     private void EditAdvanced(Action mutation)
     {
         var document=_boundDocument??ActiveDocument;if(document?.History==null)return;
         viewOutput.ResetPreview();
-        try {mutation();document.History.Commit("编辑高级属性");document.SyncHistoryState();}
-        catch {document.History.CancelPending();throw;}
-        if(_gridRefreshQueued || !IsHandleCreated)return;
-        _gridRefreshQueued=true;
-        BeginInvoke(new Action(()=>
+        try
         {
-            _gridRefreshQueued=false;
-            if(!ReferenceEquals(ActiveDocument,document))return;
-            CurrentPackageWasModified(treeView1.SelectedNode?.Name);
-        }));
+            mutation();
+            document.History.Commit("编辑高级属性");
+            document.SyncHistoryState();
+            _workspace.MarkDirty(document);
+            RefreshAfterInPlaceEdit(document);
+        }
+        catch
+        {
+            document.History.CancelPending();
+            throw;
+        }
     }
     protected override bool ProcessCmdKey(ref Message msg,Keys keyData)
     {
         var focused=FindFocused(this);
         var typing=focused is TextBoxBase or NumericUpDown or ComboBox || focused?.Parent is NumericUpDown;
+        if (keyData == (Keys.Control | Keys.Tab) || keyData == (Keys.Control | Keys.Shift | Keys.Tab))
+        {
+            var pages = _workspace.DocumentCount + 1;
+            var current = _workspace.IndexOfDocument(ActiveDocument) + 1;
+            var next = (current + ((keyData & Keys.Shift) != 0 ? pages - 1 : 1)) % pages;
+            if (next == 0) _workspace.ShowWorkspace();
+            else _workspace.Activate(_workspace.Documents[next - 1]);
+            return true;
+        }
         if(!typing && keyData==(Keys.Control|Keys.Z)){HistoryStep(false);return true;}
         if(!typing && (keyData==(Keys.Control|Keys.Y) || keyData==(Keys.Control|Keys.Shift|Keys.Z))){HistoryStep(true);return true;}
         if(!typing && keyData==Keys.Escape){viewOutput.CancelInteraction();return true;}
         if(!typing && _currentPackage!=null)
         {
-            if(viewOutput.ContainsFocus || treeView1.ContainsFocus)
+            if(keyData==(Keys.Control|Keys.V) && _packageViewExtensions.ObjectSelected!=null)
+            {
+                pasteToolStripMenuItem_Click(this,EventArgs.Empty);return true;
+            }
+            if(SelectedObjectNode()!=null)
             {
                 if(keyData==(Keys.Control|Keys.C)){copyToolStripMenuItem_Click(this,EventArgs.Empty);return true;}
                 if(keyData==(Keys.Control|Keys.X)){cutToolStripMenuItem_Click(this,EventArgs.Empty);return true;}
-                if(keyData==(Keys.Control|Keys.V)){pasteToolStripMenuItem_Click(this,EventArgs.Empty);return true;}
-                if(keyData==Keys.Delete){deleteToolStripMenuItem_Click(this,EventArgs.Empty);return true;}
+                if(keyData==Keys.Back){deleteToolStripMenuItem_Click(this,EventArgs.Empty);return true;}
             }
             if(keyData is Keys.V or Keys.W or Keys.R or Keys.E or Keys.H)
             {SetCanvasTool(keyData==Keys.V?CanvasTool.Select:keyData==Keys.W?CanvasTool.Move:keyData==Keys.R?CanvasTool.Scale:keyData==Keys.E?CanvasTool.Rotate:CanvasTool.Pan);return true;}
@@ -317,13 +434,184 @@ public partial class PackageView
                     });
                 }return true;
             }
-            if(viewOutput.ContainsFocus && keyData==Keys.Delete){deleteToolStripMenuItem_Click(this,EventArgs.Empty);return true;}
+            if(viewOutput.ContainsFocus && keyData==Keys.Back){deleteToolStripMenuItem_Click(this,EventArgs.Empty);return true;}
         }
         // Menu shortcuts for copy/cut/delete must not steal native text editing.
-        if(typing && keyData is (Keys.Control|Keys.C) or (Keys.Control|Keys.V) or (Keys.Control|Keys.X) or Keys.Delete)
+        if(typing && keyData is (Keys.Control|Keys.C) or (Keys.Control|Keys.V) or (Keys.Control|Keys.X) or Keys.Delete or Keys.Back)
             return false;
         return base.ProcessCmdKey(ref msg,keyData);
     }
     private static Control FindFocused(Control root)
     {foreach(Control c in root.Controls){if(c.Focused)return c;if(c.ContainsFocus)return FindFocused(c);}return null;}
+    private void MarkCutObject(IObject<ObjectData> obj)
+    {
+        ClearCutMarker();
+        if (obj == null) return;
+        _cutTreeKey = PackageViewExtensions.GetObjectTreeKey(obj);
+        var node = treeView1.Nodes.Find(_cutTreeKey, true).FirstOrDefault();
+        if (node == null) return;
+        node.Text = "✂ " + node.Text;
+        node.ForeColor = Color.Gray;
+        treeView1.Invalidate();
+    }
+
+    private void ClearCutMarker()
+    {
+        if (_cutTreeKey == null) return;
+        var node = treeView1.Nodes.Find(_cutTreeKey, true).FirstOrDefault();
+        if (node != null && node.Text.StartsWith("✂ ", StringComparison.Ordinal))
+        {
+            node.Text = node.Text[2..];
+            node.ForeColor = treeView1.ForeColor;
+            treeView1.Invalidate();
+        }
+        _cutTreeKey = null;
+    }
+
+    private RenderTreeNode SelectedObjectNode()
+    {
+        var treeNode=treeView1.SelectedNode?.Tag as RenderTreeNode;
+        return viewOutput.ContainsFocus
+            ? (viewOutput.SelectedNode ?? treeNode)
+            : (treeNode ?? viewOutput.SelectedNode);
+    }
+
+    private void MoveSelectedObjectToGroup()
+    {
+        if (_currentPackage == null || _currentRenderTree == null) return;
+        var node = SelectedObjectNode();
+        if (node == null) return;
+        if (node.PoseError != null)
+        {
+            MessageBox.Show(this, "对象当前布局无法求值，无法换算父级变换：\n" + node.PoseError,
+                "移动到组", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var obj = node.GetObject();
+        using var dialog = new MoveToGroupDialog(_currentPackage, obj);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        MoveObjectToGroup(obj, dialog.SelectedParent, "移动到组");
+    }
+
+    private void MoveObjectToGroup(IObject<ObjectData> obj, IObject<ObjectData> target, string label)
+    {
+        if (_currentPackage == null || _currentRenderTree == null || obj == null) return;
+        if (ReferenceEquals(obj.Parent, target)) return;
+        if (target != null && target is not Group)
+        {
+            _statusLeft.Text = "只能移动到 Group 或根级。";
+            return;
+        }
+
+        var node = FindRenderNode(_currentRenderTree, obj.Guid);
+        if (node?.PoseError != null)
+        {
+            MessageBox.Show(this, "对象当前布局无法求值，无法换算父级变换：\n" + node.PoseError,
+                label, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var document = _boundDocument ?? ActiveDocument;
+        if (document != null) document.SelectedGuid = obj.Guid;
+
+        PerformEdit(label, () =>
+        {
+            RenderGeometry.Prepare(_currentRenderTree);
+            var oldParentNode = obj.Parent == null ? null : FindRenderNode(_currentRenderTree, obj.Parent.Guid);
+            var newParentNode = target == null ? null : FindRenderNode(_currentRenderTree, target.Guid);
+            if (obj.Parent != null && oldParentNode == null)
+                throw new InvalidOperationException("找不到旧父级的渲染节点，无法计算父变换。");
+            if (target != null && newParentNode == null)
+                throw new InvalidOperationException("找不到目标组的渲染节点，无法计算父变换。");
+            var oldParentWorld = oldParentNode?.Transform ?? Matrix4x4.Identity;
+            var newParentWorld = newParentNode?.Transform ?? Matrix4x4.Identity;
+            ObjectHierarchyEditing.MoveToGroup(_currentPackage, obj, target, oldParentWorld, newParentWorld);
+        });
+    }
+
+    private void TreeItemDrag(object sender, ItemDragEventArgs e)
+    {
+        if (e.Item is TreeNode node && node.Tag is RenderTreeNode)
+            treeView1.DoDragDrop(node, DragDropEffects.Move);
+    }
+
+    private bool TryGetDropTarget(DragEventArgs e, out RenderTreeNode target, out bool root)
+    {
+        target = null;
+        root = false;
+        var point = treeView1.PointToClient(new Point(e.X, e.Y));
+        var node = treeView1.GetNodeAt(point);
+        if (node == null) { root = true; return true; }
+        if (node.Tag is not RenderTreeNode renderNode) return false;
+
+        var obj = renderNode.GetObject();
+        if (obj is Group)
+        {
+            target = renderNode;
+            return true;
+        }
+
+        if (obj.Parent == null || _currentRenderTree == null) { root = true; return true; }
+        target = FindRenderNode(_currentRenderTree, obj.Parent.Guid);
+        root = target == null;
+        return true;
+    }
+
+    private bool CanDropNode(RenderTreeNode source, RenderTreeNode target, bool root)
+    {
+        var obj = source?.GetObject();
+        if (obj == null) return false;
+        if (root) return obj.Parent != null;
+        if (target == null || target.GetObject() is not Group) return false;
+        if (ReferenceEquals(obj, target.GetObject())) return false;
+        if (obj.Parent != null && ReferenceEquals(obj.Parent, target.GetObject())) return false;
+        for (var parent = target.GetObject().Parent; parent != null; parent = parent.Parent)
+            if (ReferenceEquals(parent, obj)) return false;
+        return true;
+    }
+
+    private RenderTreeNode DragSourceNode(DragEventArgs e) =>
+        e.Data?.GetData(typeof(TreeNode)) is TreeNode node ? node.Tag as RenderTreeNode : null;
+
+    private void TreeDragEnter(object sender, DragEventArgs e)
+    {
+        e.Effect = e.Data?.GetDataPresent(typeof(TreeNode)) == true ? DragDropEffects.Move : DragDropEffects.None;
+    }
+
+    private void TreeDragOver(object sender, DragEventArgs e)
+    {
+        var source = DragSourceNode(e);
+        if (source == null || !TryGetDropTarget(e, out var target, out var root) || !CanDropNode(source, target, root))
+        {
+            e.Effect = DragDropEffects.None;
+            return;
+        }
+        e.Effect = DragDropEffects.Move;
+        var hover = treeView1.GetNodeAt(treeView1.PointToClient(new Point(e.X, e.Y)));
+        hover?.Expand();
+    }
+
+    private void TreeDragDrop(object sender, DragEventArgs e)
+    {
+        var source = DragSourceNode(e);
+        if (source == null || !TryGetDropTarget(e, out var target, out var root) || !CanDropNode(source, target, root))
+            return;
+        var targetObject = root ? null : target.GetObject();
+        MoveObjectToGroup(source.GetObject(), targetObject, "拖放移动到组");
+    }
+
+    private static RenderTreeNode FindRenderNode(IEnumerable<RenderTreeNode> nodes, uint guid)
+    {
+        foreach (var node in nodes)
+        {
+            if (node.GetObject().Guid == guid) return node;
+            if (node is RenderTreeGroup group)
+            {
+                var found = FindRenderNode(group, guid);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
 }

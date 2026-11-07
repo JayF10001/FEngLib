@@ -18,8 +18,31 @@ public static class BinaryRuntime
 {
     private static readonly object Gate = new();
     private static Assembly nikki;
+    private static Assembly ilwrapper;
     private static string loadedDirectory;
+    private static bool devilResolverSet;
     public static string WorkerHostPath { get; set; }
+    private const uint DevIlPng = 0x042A;
+    private const uint DevIlDds = 0x0437;
+    private const uint DevIlDxtcFormat = 0x705;
+
+    [DllImport("DevIL.dll", EntryPoint = "ilInit", CallingConvention = CallingConvention.StdCall)]
+    private static extern void ilInit();
+    [DllImport("DevIL.dll", EntryPoint = "ilGenImage", CallingConvention = CallingConvention.StdCall)]
+    private static extern uint ilGenImage();
+    [DllImport("DevIL.dll", EntryPoint = "ilBindImage", CallingConvention = CallingConvention.StdCall)]
+    private static extern void ilBindImage(uint image);
+    [DllImport("DevIL.dll", EntryPoint = "ilDeleteImage", CallingConvention = CallingConvention.StdCall)]
+    private static extern void ilDeleteImage(uint image);
+    [DllImport("DevIL.dll", EntryPoint = "ilLoadL", CallingConvention = CallingConvention.StdCall)]
+    private static extern bool ilLoadL(uint type, IntPtr data, uint size);
+    [DllImport("DevIL.dll", EntryPoint = "ilSaveL", CallingConvention = CallingConvention.StdCall)]
+    private static extern uint ilSaveL(uint type, IntPtr data, uint size);
+    [DllImport("DevIL.dll", EntryPoint = "ilSetInteger", CallingConvention = CallingConvention.StdCall)]
+    private static extern void ilSetInteger(uint mode, int value);
+    [DllImport("DevIL.dll", EntryPoint = "ilGetError", CallingConvention = CallingConvention.StdCall)]
+    private static extern int ilGetError();
+
     private static string SettingsFile => Path.Combine(Environment.GetFolderPath(
         Environment.SpecialFolder.LocalApplicationData), "FEngViewer", "binary-runtime.json");
 
@@ -89,6 +112,227 @@ public static class BinaryRuntime
         }
     }
 
+    private static Assembly IlRuntime
+    {
+        get
+        {
+            lock (Gate)
+            {
+                var directory = DirectoryPath;
+                Validate(directory);
+                if (ilwrapper != null) return ilwrapper;
+                var file = Path.Combine(directory, "ILWrapper.dll");
+                if (!File.Exists(file))
+                    throw new FileNotFoundException("Binary 运行库缺少 ILWrapper.dll", file);
+                var context = new RuntimeContext(directory);
+                ilwrapper = context.LoadFromAssemblyPath(file);
+                NativeLibrary.SetDllImportResolver(ilwrapper, (name, _, _) =>
+                {
+                    var path = Path.Combine(directory, name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? name : name + ".dll");
+                    return File.Exists(path) ? NativeLibrary.Load(path) : IntPtr.Zero;
+                });
+                return ilwrapper;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Read-only TPK catalog for the texture resolver. Binary objects stay alive through
+    /// <see cref="BinaryTextureInfo.Owner"/> and are never written back here.
+    /// </summary>
+    public static List<BinaryTextureInfo> LoadTextures(string archivePath) =>
+        LoadTextures(archivePath, out _);
+
+    public static List<BinaryTextureInfo> LoadTextures(string archivePath, out bool hasOuterCompression)
+    {
+        archivePath = Path.GetFullPath(archivePath);
+        var result = new List<BinaryTextureInfo>();
+        var asm = Runtime;
+        using var source = File.OpenRead(archivePath);
+        using var header = new BinaryReader(source, System.Text.Encoding.UTF8, leaveOpen: true);
+        var marker = source.Length >= 4 ? header.ReadUInt32() : 0;
+        source.Position = 0;
+        var codecType = asm.GetType("Nikki.Reflection.Enum.LZCompressionType");
+        hasOuterCompression = Enum.IsDefined(codecType, Enum.ToObject(codecType, marker));
+        using var decoded = hasOuterCompression
+            ? new MemoryStream(Decompress(header.ReadBytes(checked((int)source.Length))), writable: false)
+            : null;
+        using var reader = new BinaryReader((Stream)decoded ?? source, System.Text.Encoding.UTF8, leaveOpen: true);
+        var index = ContainerBlockIndex.Scan(reader.BaseStream, archivePath, source.Length, null, hashBlocks: false);
+        var offsets = index.Blocks
+            .Where(block => block.ChunkId is 0xB3300000 or 0x0003A100 or 0x0003BD00)
+            .Select(block => block.Offset).ToList();
+        if (offsets.Count == 0) return result;
+
+        // Datamap.Load opens a relative MainLog.txt and parses unrelated resources. Invoke
+        // its TPK manager with the same ordered block offsets instead.
+        var dbType = asm.GetType("Nikki.Support.MostWanted.Datamap");
+        var db = Activator.CreateInstance(dbType);
+        var manager = dbType.GetProperty("TPKBlocks").GetValue(db);
+        var blockType = asm.GetType("Nikki.Core.Block");
+        var blockIdType = asm.GetType("Nikki.Reflection.Enum.BinBlockID");
+        var tpkBlocks = Activator.CreateInstance(blockType, Enum.Parse(blockIdType, "TPKBlocks"));
+        blockType.GetProperty("Offsets").SetValue(tpkBlocks, offsets);
+        try
+        {
+            manager.GetType().GetMethod("Disassemble", BindingFlags.Instance | BindingFlags.NonPublic,
+                null, new[] { typeof(BinaryReader), blockType }, null)
+                .Invoke(manager, new[] { (object)reader, tpkBlocks });
+        }
+        catch (TargetInvocationException e)
+        {
+            throw new InvalidDataException("Binary: " + e.InnerException?.Message, e.InnerException);
+        }
+
+        // TPKBlockManager processes TPKBlocks offsets in order and skips the texture-page
+        // setting blocks. The ordinal mapping is only trustworthy when both counts agree; a
+        // mismatch leaves the block offset unknown instead of guessing.
+        var tpkBlockOffsets = new List<long>();
+        foreach (var offset in offsets)
+        {
+            reader.BaseStream.Position = offset;
+            if (reader.ReadUInt32() == 0xB3300000) tpkBlockOffsets.Add(offset);
+        }
+        var tpks = ((IEnumerable)manager).Cast<object>().ToList();
+        var confirmedOffsets = tpkBlockOffsets.Count == tpks.Count ? tpkBlockOffsets : null;
+
+        for (var tpkOrdinal = 0; tpkOrdinal < tpks.Count; tpkOrdinal++)
+        {
+            var tpk = tpks[tpkOrdinal];
+            var tpkName = Convert.ToString(tpk.GetType().GetProperty("CollectionName").GetValue(tpk));
+            var textureOrdinal = 0;
+            foreach (var texture in ((IEnumerable)tpk.GetType().GetProperty("Textures").GetValue(tpk)).Cast<object>())
+            {
+                result.Add(new BinaryTextureInfo
+                {
+                    Instance = texture,
+                    Owner = db,
+                    ArchivePath = archivePath,
+                    ArchiveHasOuterCompression = hasOuterCompression,
+                    TpkName = tpkName,
+                    TpkOrdinal = tpkOrdinal,
+                    TpkBlockOffset = confirmedOffsets?[tpkOrdinal],
+                    TextureOrdinal = textureOrdinal++,
+                    Name = Convert.ToString(texture.GetType().GetProperty("CollectionName").GetValue(texture)),
+                    BinKey = Convert.ToUInt32(texture.GetType().GetProperty("BinKey").GetValue(texture)),
+                    Width = Convert.ToInt32(texture.GetType().GetProperty("Width").GetValue(texture)),
+                    Height = Convert.ToInt32(texture.GetType().GetProperty("Height").GetValue(texture)),
+                    Compression = Convert.ToString(texture.GetType().GetProperty("Compression").GetValue(texture)),
+                });
+            }
+        }
+        return result;
+    }
+
+    public static byte[] ExportTextureDds(BinaryTextureInfo texture, bool noPalette)
+    {
+        if (texture?.Instance == null) throw new ArgumentNullException(nameof(texture));
+        return (byte[])Call(texture.Instance.GetType(), texture.Instance, "GetDDSArray", noPalette);
+    }
+
+    public static byte[] ExportTexturePng(BinaryTextureInfo texture)
+    {
+        var dds = ExportTextureDds(texture, true);
+        var asm = IlRuntime;
+        var imageType = asm.GetType("ILWrapper.Enums.ImageType");
+        var pngType = Enum.Parse(imageType, "PNG");
+        var image = Activator.CreateInstance(asm.GetType("ILWrapper.Image"), new object[] { dds });
+        try
+        {
+            using var stream = new MemoryStream();
+            image.GetType().GetMethod("Save", new[] { typeof(Stream), imageType })
+                .Invoke(image, new object[] { stream, pngType });
+            return stream.ToArray();
+        }
+        finally
+        {
+            if (image is IDisposable disposable) disposable.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Encodes a PNG as a compressed DDS using the same DevIL build that Binary uses. The caller
+    /// must request the original TPK format (DXTC1/DXTC3/DXTC5); uncompressed/palette formats are
+    /// intentionally rejected until their write-back path is verified.
+    /// </summary>
+    public static byte[] EncodeTextureDds(byte[] pngData, string compression)
+    {
+        if (pngData == null || pngData.Length == 0)
+            throw new ArgumentException("PNG 数据为空。", nameof(pngData));
+        var normalized = (compression ?? "").ToUpperInvariant();
+        var format = normalized switch
+        {
+            "TEXCOMP_DXTC1" => 0x706,
+            "TEXCOMP_DXTC3" => 0x708,
+            "TEXCOMP_DXTC5" => 0x70A,
+            _ => throw new NotSupportedException(
+                $"暂不支持把 PNG 写成 {compression}；目前支持 TEXCOMP_DXTC1/DXTC3/DXTC5。")
+        };
+        lock (Gate)
+        {
+            EnsureDevILResolver();
+            var directory = DirectoryPath ?? throw new NotSupportedException(
+                "请先在容器窗口配置 Binary 2.9 的安装目录（需要 DevIL.dll）。");
+            if (!File.Exists(Path.Combine(directory, "DevIL.dll")))
+                throw new FileNotFoundException("Binary 运行库缺少 DevIL.dll", Path.Combine(directory, "DevIL.dll"));
+            ilInit();
+            var image = ilGenImage();
+            if (image == 0) throw new InvalidDataException("DevIL 无法创建图像。");
+            ilBindImage(image);
+            try
+            {
+                var handle = GCHandle.Alloc(pngData, GCHandleType.Pinned);
+                try
+                {
+                    if (!ilLoadL(DevIlPng, handle.AddrOfPinnedObject(), (uint)pngData.Length))
+                        throw new InvalidDataException("DevIL 无法加载 PNG：" + ilGetError());
+                }
+                finally { handle.Free(); }
+                ilSetInteger(DevIlDxtcFormat, format);
+                var setError = ilGetError();
+                if (setError != 0)
+                    throw new InvalidDataException("DevIL 不支持该 DXT 格式：" + setError);
+                var size = ilSaveL(DevIlDds, IntPtr.Zero, 0);
+                if (size == 0 || size > int.MaxValue)
+                    throw new InvalidDataException("DevIL 无法写出 DDS：" + ilGetError());
+                var output = Marshal.AllocHGlobal((int)size);
+                try
+                {
+                    if (ilSaveL(DevIlDds, output, size) == 0)
+                        throw new InvalidDataException("DevIL 无法写出 DDS：" + ilGetError());
+                    var dds = new byte[size];
+                    Marshal.Copy(output, dds, 0, (int)size);
+                    var expected = normalized switch
+                    {
+                        "TEXCOMP_DXTC1" => "DXT1",
+                        "TEXCOMP_DXTC3" => "DXT3",
+                        _ => "DXT5",
+                    };
+                    var fourCc = System.Text.Encoding.ASCII.GetString(dds, 84, 4);
+                    if (fourCc != expected)
+                        throw new InvalidDataException($"DDS 格式不符：期望 {expected}，实际 {fourCc}。");
+                    return dds;
+                }
+                finally { Marshal.FreeHGlobal(output); }
+            }
+            finally { ilDeleteImage(image); }
+        }
+    }
+
+    private static void EnsureDevILResolver()
+    {
+        if (devilResolverSet) return;
+        NativeLibrary.SetDllImportResolver(typeof(BinaryRuntime).Assembly, (name, assembly, path) =>
+        {
+            if (!string.Equals(name, "DevIL.dll", StringComparison.OrdinalIgnoreCase)) return IntPtr.Zero;
+            var directory = DirectoryPath;
+            if (string.IsNullOrWhiteSpace(directory)) return IntPtr.Zero;
+            var file = Path.Combine(directory, "DevIL.dll");
+            return File.Exists(file) ? NativeLibrary.Load(file) : IntPtr.Zero;
+        });
+        devilResolverSet = true;
+    }
+
     internal static byte[] Decompress(byte[] bytes)
     {
         if (bytes.Length < 16) throw new InvalidDataException("压缩头不足 16 字节。");
@@ -146,6 +390,7 @@ public static class BinaryRuntime
     public static bool TryRunWorker(string[] args, out int exitCode)
     {
         exitCode = 0;
+        if (ContainerTextureWriteBack.TryRunWorker(args, out exitCode)) return true;
         if (args.Length != 2 || args[0] != "--feng-binary-worker") return false;
         try
         {
@@ -223,7 +468,12 @@ public static class BinaryRuntime
         return result;
     }
 
-    private static object Call(Type type, object instance, string method, params object[] args)
+    internal static Assembly RuntimeAssembly => Runtime;
+
+    internal static object CreateOptions(string path) =>
+        Activator.CreateInstance(Runtime.GetType("Nikki.Core.Options"), path, "", false, false);
+
+    internal static object Call(Type type, object instance, string method, params object[] args)
     {
         try { return type.InvokeMember(method, BindingFlags.Public | BindingFlags.Static |
             BindingFlags.Instance | BindingFlags.InvokeMethod, null, instance, args); }

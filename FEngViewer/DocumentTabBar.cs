@@ -9,7 +9,8 @@ namespace FEngViewer;
 
 /// <summary>
 /// Lightweight document tab strip: name plus unsaved marker, close buttons, horizontal scrolling,
-/// middle/right click actions and drag reordering.
+/// middle/right click actions and drag reordering. The global workspace header lives outside
+/// the document viewport and never enters the document list or its hit testing.
 /// It is only a header; the editor controls stay in one place and are never reparented.
 /// </summary>
 internal sealed class DocumentTabBar : Control
@@ -37,6 +38,8 @@ internal sealed class DocumentTabBar : Control
     private int CloseBoxSize => Math.Max(12, LineHeight - 2);
     private int ScrollButtonWidth => Math.Max(16, LineHeight + 2);
     private int TabGap => Math.Max(2, LineHeight / 8);
+    private int WorkspaceWidth => TextRenderer.MeasureText("工作区", Font).Width + TabPadding * 3 + LineHeight;
+    private Rectangle WorkspaceRect => new(0, TabTop, WorkspaceWidth, Math.Max(18, Height - TabTop));
 
     /// <summary>Height the strip wants for the current font.</summary>
     public int PreferredHeight => LineHeight + 16;
@@ -69,6 +72,7 @@ internal sealed class DocumentTabBar : Control
     }
 
     public event Action<int> SelectionRequested;
+    public event Action WorkspaceRequested;
     public event Action<int> CloseRequested;
     public event Action<int> ContextMenuRequested;
     public event Action<int, int> ReorderRequested;
@@ -144,7 +148,7 @@ internal sealed class DocumentTabBar : Control
         get
         {
             var reserved = _overflow ? 2 * ScrollButtonWidth : 0;
-            return Math.Max(0, Width - reserved);
+            return Math.Max(0, Width - WorkspaceWidth - TabGap - reserved);
         }
     }
 
@@ -161,7 +165,7 @@ internal sealed class DocumentTabBar : Control
 
     private Rectangle TabRect(int index)
     {
-        var left = TabLeft(index);
+        var left = WorkspaceWidth + TabGap + TabLeft(index);
         return new Rectangle(left, TabTop, _widths[index], Math.Max(18, Height - TabTop));
     }
 
@@ -184,7 +188,7 @@ internal sealed class DocumentTabBar : Control
 
         _measuredCaptions.Clear();
         _measuredCaptions.AddRange(_items.Select(item => item.Caption));
-        _overflow = ContentWidth > Width;
+        _overflow = ContentWidth > Width - WorkspaceWidth - TabGap;
         _scrollOffset = Math.Clamp(_scrollOffset, 0, MaxScrollOffset);
         PositionButtons();
     }
@@ -193,7 +197,7 @@ internal sealed class DocumentTabBar : Control
     private void RefreshLayout()
     {
         if (_widths.Count != _items.Count) MeasureTabs();
-        _overflow = ContentWidth > Width;
+        _overflow = ContentWidth > Width - WorkspaceWidth - TabGap;
         _scrollOffset = Math.Clamp(_scrollOffset, 0, MaxScrollOffset);
         PositionButtons();
     }
@@ -212,7 +216,7 @@ internal sealed class DocumentTabBar : Control
         var top = TabTop;
         if (_overflow)
         {
-            var available = AvailableWidth;
+            var available = WorkspaceWidth + TabGap + AvailableWidth;
             _scrollLeftRect = new Rectangle(available, top, ScrollButtonWidth, height);
             _scrollRightRect = new Rectangle(available + ScrollButtonWidth, top, ScrollButtonWidth, height);
         }
@@ -233,13 +237,28 @@ internal sealed class DocumentTabBar : Control
         using (var pen = new Pen(EditorTheme.Border))
             g.DrawLine(pen, 0, bottomLine, Width, bottomLine);
 
-        var clip = new Rectangle(0, 0, AvailableWidth, Height);
+        var workspace = WorkspaceRect;
+        using (var background = new SolidBrush(_selectedIndex < 0 ? SystemColors.Highlight : EditorTheme.Input))
+            g.FillRectangle(background, workspace);
+        var iconSize = Math.Max(12, LineHeight - 2);
+        var icon = new Rectangle(TabPadding, workspace.Top + (workspace.Height - iconSize) / 2, iconSize, iconSize);
+        using (var folder = new SolidBrush(Color.Goldenrod))
+            g.FillRectangle(folder, icon.Left, icon.Top + iconSize / 6, iconSize / 2, iconSize / 3);
+        using (var folder = new SolidBrush(Color.FromArgb(242, 193, 78)))
+            g.FillRectangle(folder, icon.Left, icon.Top + iconSize / 3, iconSize, iconSize * 2 / 3);
+        var workspaceText = new Rectangle(icon.Right + TabPadding, workspace.Top,
+            WorkspaceWidth - icon.Right - TabPadding, workspace.Height);
+        TextRenderer.DrawText(g, "工作区", Font, workspaceText,
+            _selectedIndex < 0 ? SystemColors.HighlightText : EditorTheme.Text,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+
+        var clip = new Rectangle(WorkspaceWidth + TabGap, 0, AvailableWidth, Height);
         var state = g.Save();
         g.SetClip(clip);
         for (var i = 0; i < _items.Count; i++)
         {
             var rect = TabRect(i);
-            if (rect.Right < 0 || rect.Left > clip.Width) continue;
+            if (rect.Right < clip.Left || rect.Left > clip.Right) continue;
             PaintTab(g, i, rect);
         }
 
@@ -333,9 +352,10 @@ internal sealed class DocumentTabBar : Control
 
     private void PaintDropIndicator(Graphics g)
     {
-        var x = _dragTarget >= _items.Count
+        var x = WorkspaceWidth + TabGap + (_dragTarget >= _items.Count
             ? TabLeft(_items.Count - 1) + (_items.Count > 0 ? _widths[^1] : 0)
-            : TabLeft(_dragTarget);
+            : TabLeft(_dragTarget));
+        x = Math.Clamp(x, WorkspaceWidth + TabGap, WorkspaceWidth + TabGap + AvailableWidth);
         using var pen = new Pen(SystemColors.Highlight, 2f);
         g.DrawLine(pen, x, TabTop, x, Height - 2);
     }
@@ -345,12 +365,11 @@ internal sealed class DocumentTabBar : Control
     private int HitTest(Point point, out bool onClose)
     {
         onClose = false;
-        if (point.X < AvailableWidth)
+        if (point.X >= WorkspaceWidth + TabGap && point.X < WorkspaceWidth + TabGap + AvailableWidth)
         {
             for (var i = 0; i < _items.Count; i++)
             {
                 var rect = TabRect(i);
-                if (rect.Right < 0 || rect.Left > AvailableWidth) continue;
                 if (!rect.Contains(point)) continue;
                 onClose = CloseRect(i).Contains(point);
                 return i;
@@ -391,7 +410,7 @@ internal sealed class DocumentTabBar : Control
 
     private int InsertionIndex(int x)
     {
-        var position = x + _scrollOffset;
+        var position = x - WorkspaceWidth - TabGap + _scrollOffset;
         var cursor = 0;
         for (var i = 0; i < _widths.Count; i++)
         {
@@ -406,6 +425,11 @@ internal sealed class DocumentTabBar : Control
     {
         base.OnMouseDown(e);
         Focus();
+        if (WorkspaceRect.Contains(e.Location))
+        {
+            if (e.Button == MouseButtons.Left) WorkspaceRequested?.Invoke();
+            return;
+        }
         if (_overflow && PointIn(_scrollLeftRect, e.Location))
         {
             _scrollOffset = Math.Max(0, _scrollOffset - 80);

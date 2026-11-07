@@ -11,7 +11,8 @@ public enum ContainerBlockKind
     Fng,
     CompressedFng,
     Padding,
-    Unknown
+    Unknown,
+    Tpk
 }
 
 /// <summary>
@@ -89,10 +90,15 @@ public sealed class ContainerBlockIndex
     {
         path = Path.GetFullPath(path);
         using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        using var reader = new BinaryReader(stream, Encoding.UTF8, true);
         var sourceHash = FngContainer.Hash(stream);
         stream.Position = 0;
+        return Scan(stream, path, stream.Length, sourceHash, hashBlocks: true);
+    }
 
+    internal static ContainerBlockIndex Scan(Stream stream, string path, long sourceLength,
+        string sourceHash, bool hashBlocks)
+    {
+        using var reader = new BinaryReader(stream, Encoding.UTF8, true);
         var blocks = new List<ContainerBlock>();
         var sequence = 0;
         while (stream.Position < stream.Length)
@@ -110,13 +116,13 @@ public sealed class ContainerBlockIndex
                     $"Chunk 0x{id:X8} at 0x{offset:X} exceeds file bounds in {path}.");
 
             stream.Position = offset;
-            var sha = FngContainer.HashRange(stream, payloadLength + 8L);
+            var sha = hashBlocks ? FngContainer.HashRange(stream, payloadLength + 8L) : null;
             blocks.Add(Classify(reader, stream, sequence, offset, id, payloadLength, sha));
             stream.Position = offset + 8 + payloadLength;
             sequence++;
         }
 
-        return new ContainerBlockIndex(path, stream.Length, sourceHash, blocks);
+        return new ContainerBlockIndex(path, sourceLength, sourceHash, blocks);
     }
 
     public ContainerBlock FindBlockAtOffset(long offset)
@@ -145,7 +151,7 @@ public sealed class ContainerBlockIndex
         if (id == FngContainer.FngChunkId || id == FngContainer.CompressedFngChunkId)
         {
             stream.Position = offset + 8;
-            var entry = FngContainer.ReadEntry(reader, offset, id, (uint)payloadLength);
+            var entry = FngContainer.ReadEntry(reader, offset, id, (uint)payloadLength, hashEntry: false);
             var kind = entry.Storage == FngStorageKind.Compressed
                 ? ContainerBlockKind.CompressedFng
                 : ContainerBlockKind.Fng;
@@ -153,7 +159,8 @@ public sealed class ContainerBlockIndex
                 entry.Name, entry.Diagnostic, false, null, sha);
         }
 
-        return new ContainerBlock(sequence, offset, id, payloadLength, ContainerBlockKind.Unknown,
+        var resourceKind = id == 0xB3300000 ? ContainerBlockKind.Tpk : ContainerBlockKind.Unknown;
+        return new ContainerBlock(sequence, offset, id, payloadLength, resourceKind,
             FngStorageKind.Invalid, null, null, false, null, sha);
     }
 

@@ -1,10 +1,15 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net6.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>Assets\FEngEditor.ico</ApplicationIcon>
+    <AssemblyName>FEngEditor</AssemblyName>
+    <RootNamespace>FEngViewer</RootNamespace>
+    <Product>FEngEditor</Product>
+    <AssemblyTitle>FEngEditor</AssemblyTitle>
+    <Description>A graphical FNG and container editor for the EA BlackBox Need for Speed games</Description>
   </PropertyGroup>
 
   <ItemGroup>
