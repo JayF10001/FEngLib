@@ -199,6 +199,7 @@ public partial class PackageView
 
     private void RefreshRecentProjects()
     {
+        SortRecentEntries();
         if (!_recentProjectsList.Items.Cast<RecentEntry>().SequenceEqual(_recentEntries))
         {
             _recentProjectsList.Items.Clear();

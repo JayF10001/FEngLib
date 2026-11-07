@@ -18,6 +18,9 @@ internal sealed class ViewerLayoutState
     public string[] RecentContainers { get; set; } = Array.Empty<string>();
     public string[] RecentFiles { get; set; } = Array.Empty<string>();
 
+    /// <summary>One globally ordered history; supersedes the per-kind arrays above.</summary>
+    public RecentEntryState[] RecentEntries { get; set; } = Array.Empty<RecentEntryState>();
+
     public ViewerLayoutState Clone() => new()
     {
         LeftWidth = LeftWidth,
@@ -28,8 +31,16 @@ internal sealed class ViewerLayoutState
         ,SimpleTree = SimpleTree, DarkTheme = DarkTheme,
         RecentProjects = RecentProjects ?? Array.Empty<string>(),
         RecentContainers = RecentContainers ?? Array.Empty<string>(),
-        RecentFiles = RecentFiles ?? Array.Empty<string>()
+        RecentFiles = RecentFiles ?? Array.Empty<string>(),
+        RecentEntries = RecentEntries ?? Array.Empty<RecentEntryState>()
     };
+}
+
+internal sealed class RecentEntryState
+{
+    public string Kind { get; set; }
+    public string Path { get; set; }
+    public DateTimeOffset LastUsedUtc { get; set; }
 }
 
 /// <summary>

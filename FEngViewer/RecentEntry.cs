@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 
 namespace FEngViewer;
@@ -9,7 +10,7 @@ internal enum RecentEntryKind
     LooseFng
 }
 
-internal sealed record RecentEntry(RecentEntryKind Kind, string Path)
+internal sealed record RecentEntry(RecentEntryKind Kind, string Path, DateTimeOffset LastUsedUtc)
 {
     public string DisplayName
     {

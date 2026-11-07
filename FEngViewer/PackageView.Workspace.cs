@@ -112,6 +112,7 @@ public partial class PackageView
             if (_legacyFiles.Contains(save.Document.SourcePath)) _writeBack.PrepareSave(save);
         };
         _workspace.SaveFinished += (_, save) => _writeBack.FinishSave(save);
+        _workspace.Saved += (_, document) => RememberRecentDocument(document);
         _writeBack.ConfirmVersionSwitch = message => MessageBox.Show(this, message,
             "切换待写回版本", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
         _boldNodeFont = new Font(treeView1.Font, FontStyle.Bold);
@@ -673,33 +674,74 @@ public partial class PackageView
         if (string.IsNullOrWhiteSpace(path)) return;
         path = Path.GetFullPath(path);
         _recentEntries.RemoveAll(entry => string.Equals(entry.Path, path, StringComparison.OrdinalIgnoreCase));
-        _recentEntries.Insert(0, new RecentEntry(kind, path));
+        _recentEntries.Insert(0, new RecentEntry(kind, path, DateTimeOffset.UtcNow));
         foreach (var value in Enum.GetValues<RecentEntryKind>())
         {
             var extra = _recentEntries.Where(entry => entry.Kind == value).Skip(10).ToArray();
             foreach (var entry in extra) _recentEntries.Remove(entry);
         }
+        SortRecentEntries();
         PersistRecentEntries();
+    }
+
+    private void SortRecentEntries() => _recentEntries.Sort((left, right) =>
+    {
+        var byTime = SortTimestamp(right).CompareTo(SortTimestamp(left));
+        return byTime != 0 ? byTime : string.Compare(left.Path, right.Path, StringComparison.OrdinalIgnoreCase);
+    });
+
+    /// <summary>History order follows the file's last write time; LastUsedUtc only covers missing files.</summary>
+    private static DateTimeOffset SortTimestamp(RecentEntry entry)
+    {
+        var modified = FileTimestamp(entry.Path);
+        return modified == DateTimeOffset.MinValue ? entry.LastUsedUtc : modified;
     }
 
     private void LoadRecentEntries()
     {
         _recentEntries.Clear();
         var state = ViewerSettings.Load();
-        void Add(RecentEntryKind kind, string path)
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Add(RecentEntryKind kind, string path, DateTimeOffset lastUsedUtc)
         {
             if (string.IsNullOrWhiteSpace(path)) return;
             var full = Path.GetFullPath(path);
-            if (_recentEntries.Any(entry => string.Equals(entry.Path, full, StringComparison.OrdinalIgnoreCase)))
-                return;
-            _recentEntries.Add(new RecentEntry(kind, full));
+            if (!seen.Add(full)) return;
+            _recentEntries.Add(new RecentEntry(kind, full, lastUsedUtc));
         }
-        foreach (var path in state.RecentProjects ?? Array.Empty<string>())
-            Add(ClassifyRecentPath(path), path);
-        foreach (var path in state.RecentContainers ?? Array.Empty<string>())
-            Add(RecentEntryKind.Container, path);
-        foreach (var path in state.RecentFiles ?? Array.Empty<string>())
-            Add(RecentEntryKind.LooseFng, path);
+
+        if (state.RecentEntries is { Length: > 0 })
+        {
+            // Newest format: one globally ordered list with per-entry timestamps.
+            foreach (var entry in state.RecentEntries)
+            {
+                if (entry == null || string.IsNullOrWhiteSpace(entry.Path)) continue;
+                var kind = Enum.TryParse<RecentEntryKind>(entry.Kind, true, out var parsed)
+                    ? parsed
+                    : ClassifyRecentPath(entry.Path);
+                Add(kind, entry.Path,
+                    entry.LastUsedUtc == default ? FileTimestamp(entry.Path) : entry.LastUsedUtc);
+            }
+        }
+        else
+        {
+            // Older settings grouped by kind; use each file's modification time so the first run
+            // after upgrading already shows one global order instead of projects/containers/FNGs.
+            foreach (var path in state.RecentProjects ?? Array.Empty<string>())
+                Add(ClassifyRecentPath(path), path, FileTimestamp(path));
+            foreach (var path in state.RecentContainers ?? Array.Empty<string>())
+                Add(RecentEntryKind.Container, path, FileTimestamp(path));
+            foreach (var path in state.RecentFiles ?? Array.Empty<string>())
+                Add(RecentEntryKind.LooseFng, path, FileTimestamp(path));
+        }
+
+        SortRecentEntries();
+    }
+
+    private static DateTimeOffset FileTimestamp(string path)
+    {
+        try { return File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTimeOffset.MinValue; }
+        catch (Exception) { return DateTimeOffset.MinValue; }
     }
 
     private static RecentEntryKind ClassifyRecentPath(string path)
@@ -715,6 +757,13 @@ public partial class PackageView
     private void PersistRecentEntries()
     {
         var state = ViewerSettings.Load();
+        state.RecentEntries = _recentEntries.Select(entry => new RecentEntryState
+        {
+            Kind = entry.Kind.ToString(),
+            Path = entry.Path,
+            LastUsedUtc = entry.LastUsedUtc
+        }).ToArray();
+        // Keep the per-kind arrays for older builds and for hand-edited settings.
         state.RecentProjects = _recentEntries.Where(entry => entry.Kind == RecentEntryKind.Project)
             .Select(entry => entry.Path).Take(10).ToArray();
         state.RecentContainers = _recentEntries.Where(entry => entry.Kind == RecentEntryKind.Container)
@@ -1510,6 +1559,7 @@ public partial class PackageView
 
     private void RefreshRecentDocumentsMenu()
     {
+        SortRecentEntries();
         while (_recentDocumentsMenu.DropDownItems.Count > 0)
             _recentDocumentsMenu.DropDownItems[0].Dispose();
         _recentDocumentsMenu.Enabled = _recentEntries.Count > 0;
