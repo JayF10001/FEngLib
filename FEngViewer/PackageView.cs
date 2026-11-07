@@ -18,6 +18,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Windows.Forms;
 using Image = FEngLib.Objects.Image;
 
@@ -358,7 +359,12 @@ public partial class PackageView : Form
 
 	private void SavePackageToJson(Package package, string path)
 	{
-		File.WriteAllText(path, JsonConvert.SerializeObject(package, new JsonSerializerSettings
+		File.WriteAllBytes(path, EncodePackageJson(package));
+	}
+
+	private static byte[] EncodePackageJson(Package package)
+	{
+		var json = JsonConvert.SerializeObject(package, new JsonSerializerSettings
 		{
 			Formatting = Formatting.Indented,
 			Converters = new List<JsonConverter>
@@ -369,7 +375,8 @@ public partial class PackageView : Form
 			ReferenceLoopHandling = ReferenceLoopHandling.Error,
 			PreserveReferencesHandling = PreserveReferencesHandling.Objects,
 			NullValueHandling = NullValueHandling.Ignore
-		}));
+		});
+		return new UTF8Encoding(false).GetBytes(json);
 	}
 
 	private void OpenRecentlySaved(string path, bool fileIsJson)

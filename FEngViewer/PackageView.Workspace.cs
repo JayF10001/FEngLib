@@ -83,6 +83,8 @@ public partial class PackageView
     private ToolStripMenuItem _containerIndexMenu;
     private ToolStripMenuItem _closeContainerMenu;
     private ToolStripMenuItem _projectWriteBackMenu;
+    private ToolStripMenuItem _restoreBackupMenu;
+    private readonly StandaloneFileBackupService _standaloneBackups = new();
     private readonly HashSet<string> _legacyFiles = new(StringComparer.OrdinalIgnoreCase);
     private Font _boldNodeFont;
     private ImageList _workspaceIcons;
@@ -402,6 +404,8 @@ public partial class PackageView
         items.AddRange(new ToolStripItem[] { _saveMenu, _saveAsMenu, _saveAllMenu });
         items.Add(CreateMenuItem("导出 FNG…", Keys.None, (_, _) => ExportFng(_workspace.Active)));
         items.Add(CreateMenuItem("Reload", Keys.Control | Keys.Shift | Keys.R, (_, _) => ReloadActiveDocument()));
+        _restoreBackupMenu = CreateMenuItem("从备份恢复…", Keys.None, (_, _) => RestoreActiveBackup());
+        items.Add(_restoreBackupMenu);
         items.Add(new ToolStripSeparator());
         items.Add(CreateMenuItem("配置 Binary 运行库…", Keys.None, (_, _) => ConfigureBinaryRuntime()));
         _containerIndexMenu = CreateMenuItem("查看容器块索引…", Keys.None, (_, _) => ShowContainerBlockIndex());
@@ -510,6 +514,8 @@ public partial class PackageView
         _saveAsMenu.Text = _containerProject != null ? "工程另存为…" : "另存为…";
         _cleanupMenu.Enabled = active != null && active.Project == null;
         _saveAllMenu.Enabled = _containerProject == null && _workspace.DirtyCount > 0;
+        _restoreBackupMenu.Enabled = active != null && active.Project == null &&
+                                     _standaloneBackups.TryReadBackupInfo(active.FilePath) != null;
         _containerIndexMenu.Visible = _closeContainerMenu.Visible = _projectWriteBackMenu.Visible = _containerProject != null;
         _legacyWriteBackMenu.Visible = active != null && active.Project == null && _legacyFiles.Contains(active.SourcePath);
         SetFormDetails();
@@ -1280,7 +1286,7 @@ public partial class PackageView
         }
         if (_workspace.Active == null)
         {
-            MessageBox.Show(this, "当前没有打开的文档。", "Save", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "当前没有打开的文档。", "保存", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
@@ -1571,12 +1577,21 @@ public partial class PackageView
     {
         try
         {
-            if (isJson) SavePackageToJson(document.Package, path);
-            else SavePackageToChunk(document.Package, path);
+            var content = isJson ? EncodePackageJson(document.Package) : EncodePackageChunk(document.Package);
+            var result = _standaloneBackups.Save(path, content, new StandaloneSaveOptions
+            {
+                // Save-as already asked for the target; snapshot it instead of asking a second time.
+                SnapshotInsteadOfPrompt = offerOpenFolder,
+                ResolveConflict = offerOpenFolder ? null : ResolveStandaloneConflict
+            });
+            if (result.Cancelled) return false;
+            if (result.Warnings.Count > 0)
+                MessageBox.Show(this, string.Join(Environment.NewLine, result.Warnings),
+                    "保存完成，但备份记录未更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         catch (Exception error)
         {
-            MessageBox.Show(this, error.Message, "Save failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, error.Message, "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return false;
         }
 
@@ -1584,11 +1599,80 @@ public partial class PackageView
         return true;
     }
 
+    private StandaloneConflictAction ResolveStandaloneConflict(StandaloneExternalChange change)
+    {
+        var message =
+            "文件在磁盘上的内容与编辑器上次写入的版本不一致，本次保存尚未写入。\n\n" +
+            change.Path + "\n\n" +
+            $"编辑器上次写入：{FormatBackupMoment(change.ExpectedWriteUtc)}\n" +
+            $"磁盘当前修改：{FormatBackupMoment(change.ActualModifiedUtc)}\n\n" +
+            "选择“是”：先把磁盘上的当前版本另存为备份快照，再写入编辑器内容。\n" +
+            "选择“否”：取消本次保存。";
+        return MessageBox.Show(this, message, "文件已被外部修改", MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
+               == DialogResult.Yes
+            ? StandaloneConflictAction.BackupAndSave
+            : StandaloneConflictAction.Cancel;
+    }
+
+    private void RestoreActiveBackup()
+    {
+        var document = _workspace?.Active;
+        if (document == null)
+        {
+            MessageBox.Show(this, "当前没有打开的独立 FNG 文档。", "从备份恢复",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (document.Project != null)
+        {
+            MessageBox.Show(this, "容器工程文档使用工程基线，不适用独立 FNG 的备份恢复。", "从备份恢复",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var info = _standaloneBackups.TryReadBackupInfo(document.FilePath);
+        if (info == null)
+        {
+            MessageBox.Show(this,
+                "没有找到该文件的有效备份，可能备份已被删除或元数据已损坏。\n\n" + document.FilePath,
+                "从备份恢复", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using var dialog = new RestoreBackupDialog(info, document.FilePath, document.IsDirty);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        try
+        {
+            var result = _standaloneBackups.Restore(document.FilePath);
+            _workspace.Reload(document, confirmDiscard: false);
+            var message = result.Written
+                ? $"已从备份恢复 {Path.GetFileName(document.FilePath)}"
+                : "当前文件已与原始备份一致，没有写入";
+            if (!string.IsNullOrWhiteSpace(result.SnapshotPath))
+                message += "；恢复前版本已保存为快照";
+            _workspace.StatusMessage = message;
+            if (result.Warnings.Count > 0)
+                MessageBox.Show(this, string.Join(Environment.NewLine, result.Warnings),
+                    "恢复完成，但备份记录未更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            RefreshWorkspaceState();
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, "恢复失败：\n" + error.Message, "从备份恢复",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private static string FormatBackupMoment(DateTimeOffset? value) =>
+        value?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "—";
+
     private string ChooseSaveTarget(WorkspaceDocument document, out bool isJson)
     {
         using var dialog = new SaveFileDialog
         {
-            Filter = "FNG Files (*.fng)|*.fng|BIN Files (*.bin)|*.bin|JSON Files (*.json)|*.json",
+            Title = "保存 FNG 文件",
+            Filter = "FNG 文件 (*.fng)|*.fng|BIN 文件 (*.bin)|*.bin|JSON 文件 (*.json)|*.json",
             FileName = Path.GetFileNameWithoutExtension(document.CaptionName),
             AddExtension = true,
             InitialDirectory = Path.GetDirectoryName(document.FilePath)

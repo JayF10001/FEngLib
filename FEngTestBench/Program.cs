@@ -22,9 +22,11 @@ internal static class Program
             return WorkspaceNavigationTests.Run(args[1]);
         if (args.Length == 2 && args[0] == "--texture-tests")
             return TextureTests.Run(args[1]);
+        if (args.Length == 2 && args[0] == "--standalone-save-tests")
+            return StandaloneSaveTests.Run(args[1]);
         if (args.Length != 1)
         {
-            Console.Error.WriteLine("Usage: FEngTestBench <fng-directory> | --container-tests <output-directory> | --editing-tests <output-directory> | --workbench-tests <output-directory> | --workspace-tests <output-directory> | --texture-tests <output-directory>");
+            Console.Error.WriteLine("Usage: FEngTestBench <fng-directory> | --container-tests <output-directory> | --editing-tests <output-directory> | --workbench-tests <output-directory> | --workspace-tests <output-directory> | --texture-tests <output-directory> | --standalone-save-tests <output-directory>");
             return 1;
         }
         var stopwatch = Stopwatch.StartNew();

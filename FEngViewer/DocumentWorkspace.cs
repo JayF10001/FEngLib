@@ -470,10 +470,12 @@ internal sealed class DocumentWorkspace
         return true;
     }
 
-    public bool Reload(WorkspaceDocument document)
+    public bool Reload(WorkspaceDocument document) => Reload(document, confirmDiscard: true);
+
+    public bool Reload(WorkspaceDocument document, bool confirmDiscard)
     {
         if (document == null) return false;
-        if (document.IsDirty &&
+        if (confirmDiscard && document.IsDirty &&
             !_prompts.ConfirmDiscard(document, "重新读取会丢弃当前标签页的未保存修改，是否继续？"))
             return false;
 
