@@ -37,6 +37,9 @@ public partial class PackageView
     private static bool IsContainerPath(string path) =>
         Path.GetExtension(path).ToLowerInvariant() is ".bun" or ".lzc";
 
+    private sealed record LoadedContainerProject(ContainerProject Project, ContainerProjectSnapshot Snapshot,
+        WorkspaceDocument[] Tabs, Dictionary<long, ContainerFngContent> Edits);
+
     private void OpenContainerProject(string path)
     {
         if (_projectFilePath != null && ContainerSession.PathsEqual(path, _projectFilePath))
@@ -45,32 +48,41 @@ public partial class PackageView
             return;
         }
 
-        ContainerProject project;
-        ContainerProjectSnapshot snapshot;
-        WorkspaceDocument[] tabs;
-        Dictionary<long, ContainerFngContent> edits;
+        LoadedContainerProject loaded;
+        var recovered = false;
         try
         {
             UseWaitCursor = true;
-            snapshot = IsProjectPath(path) ? ContainerProjectFile.Load(path) : null;
-            project = snapshot?.Project ?? ContainerProject.Open(path);
-            edits = snapshot?.Edits.ToDictionary(edit => edit.Source.Block.Offset) ?? new();
-            tabs = snapshot?.Tabs.Select(offset =>
+            loaded = LoadContainerProject(path);
+        }
+        catch (ProjectBaselineMissingException)
+        {
+            UseWaitCursor = false;
+            if (!TryRecoverProjectBaseline(path, out var recoveredBaseline)) return;
+            try
             {
-                var block = project.Index.FindBlockAtOffset(offset);
-                var document = new WorkspaceDocument(project, block, original => ParseProjectFng(original, edits));
-                document.EnsureLoaded(null);
-                return document;
-            }).ToArray() ?? Array.Empty<WorkspaceDocument>();
+                UseWaitCursor = true;
+                loaded = LoadContainerProject(path, recoveredBaseline);
+                recovered = true;
+            }
+            catch (Exception retryError)
+            {
+                ShowContainerOpenError(path, retryError);
+                return;
+            }
+            finally { UseWaitCursor = false; }
         }
         catch (Exception error)
         {
-            MessageBox.Show(this, path + "\n\n" + error.Message, "无法打开容器工程",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            ShowContainerOpenError(path, error);
             return;
         }
         finally { UseWaitCursor = false; }
 
+        var project = loaded.Project;
+        var snapshot = loaded.Snapshot;
+        var tabs = loaded.Tabs;
+        var edits = loaded.Edits;
         if (!CloseWorkspaceTabs()) return;
         _containerProject = project;
         _projectFilePath = snapshot == null ? null : Path.GetFullPath(path);
@@ -90,15 +102,73 @@ public partial class PackageView
         }
         foreach (var document in tabs)
             _workspace.OpenDocument(document, activate: false, reportError: true);
-        RememberRecentContainer(project.Index.SourcePath);
+        if (File.Exists(project.Index.SourcePath)) RememberRecentContainer(project.Index.SourcePath);
         if (_projectFilePath != null) RememberRecentProject(_projectFilePath);
-        _workspace.StatusMessage = snapshot == null ? "选择左侧 FNG 以预览，双击进入编辑" : $"工程已恢复 · {SavedProjectWriteBackState()}";
+        _workspace.StatusMessage = snapshot == null ? "选择左侧 FNG 以预览，双击进入编辑" :
+            recovered ? $"工程已恢复 · {SavedProjectWriteBackState()}" :
+            $"工程已打开 · {SavedProjectWriteBackState()}";
         RefreshWorkspaceStructure();
         ApplyCachedContainerFngNames(project);
         _ = ResolveContainerFngNamesAsync(project);
         if (snapshot?.ActiveTab is long activeOffset)
             _workspace.Activate(tabs.Single(tab => tab.Block.Offset == activeOffset));
         RefreshWorkspaceState();
+        if (!string.IsNullOrWhiteSpace(snapshot?.BaselineWarning))
+        {
+            _workspace.StatusMessage = "工程已打开（基线缓存未建立）";
+            MessageBox.Show(this,
+                snapshot.BaselineWarning + "\n\n保存工程前请先修复缓存目录权限或磁盘空间，否则工程仍依赖现有容器文件。",
+                "基线缓存未建立", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private LoadedContainerProject LoadContainerProject(string path, string baselineOverride = null)
+    {
+        var snapshot = IsProjectPath(path) ? ContainerProjectFile.Load(path, baselineOverride) : null;
+        var project = snapshot?.Project ?? ContainerProject.Open(path);
+        var edits = snapshot?.Edits.ToDictionary(edit => edit.Source.Block.Offset) ?? new();
+        var tabs = snapshot?.Tabs.Select(offset =>
+        {
+            var block = project.Index.FindBlockAtOffset(offset);
+            var document = new WorkspaceDocument(project, block, original => ParseProjectFng(original, edits));
+            document.EnsureLoaded(null);
+            return document;
+        }).ToArray() ?? Array.Empty<WorkspaceDocument>();
+        return new LoadedContainerProject(project, snapshot, tabs, edits);
+    }
+
+    private bool TryRecoverProjectBaseline(string path, out string baseline)
+    {
+        baseline = null;
+        ContainerProjectInfo info;
+        try
+        {
+            info = ContainerProjectFile.Inspect(path);
+        }
+        catch (Exception inspectError)
+        {
+            MessageBox.Show(this,
+                path + "\n\n无法读取工程清单，无法进入基线恢复流程。\n" + inspectError.Message,
+                "无法打开工程", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
+
+        using var dialog = new ProjectBaselineRecoveryDialog(path, info);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return false;
+        baseline = dialog.RecoveredBaselinePath;
+        if (string.IsNullOrWhiteSpace(baseline))
+        {
+            MessageBox.Show(this, "没有获得可用的基线缓存路径，工程未打开。",
+                "恢复失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+        return true;
+    }
+
+    private void ShowContainerOpenError(string path, Exception error)
+    {
+        MessageBox.Show(this, path + "\n\n" + error.Message, "无法打开容器工程",
+            MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 
     private bool LeaveContainerProject()

@@ -273,9 +273,15 @@ internal static class ContainerTests
             var migratedProjectPath = Path.Combine(root, "legacy-migrated.fengproj");
             var migratedBaseline = ContainerProjectFile.Save(migratedProjectPath, legacySnapshot);
             var migrated = ContainerProjectFile.Load(migratedProjectPath);
+            var migratedInfo = ContainerProjectFile.Inspect(migratedProjectPath);
             Check(migrated.SourcePath == fastSourcePath && migrated.BasePath == migratedBaseline &&
                 File.Exists(migratedBaseline) && migrated.Edits.Count == 1,
                 "Version 1 project did not migrate to an independent baseline.");
+            Check(migratedInfo.Version == 3 &&
+                ProjectBaselineStore.IsCanonical(migratedInfo.BasePath, migratedInfo.BaseSha256,
+                    Path.GetFileName(migratedInfo.SourcePath)) &&
+                !ContainerSession.PathsEqual(migratedInfo.BasePath, fastSourcePath),
+                "Version 1 migration kept the original source as the recorded baseline.");
             var fastOutput = Path.Combine(root, "project-copy.bun");
             Reject<IOException>(() => ContainerProjectWriteBack.Prepare(fastProjectPath, fastSourcePath),
                 "Accepted original container as a project output.");
@@ -304,6 +310,7 @@ internal static class ContainerTests
             var deployOriginal = MakeFngWithObject("DeployTarget.fng", 3f);
             var deployEdit = MakeFngWithObject("DeployTarget.fng", 99f);
             var deploySourcePath = Save("deploy-source.bun", deployOriginal.Concat(fng).ToArray());
+            var deploySourceBytes = File.ReadAllBytes(deploySourcePath);
             var deployProject = ContainerProject.Open(deploySourcePath);
             var deploySource = deployProject.ReadFng(deployProject.Index.Blocks[0]).Source;
             var deployProjectPath = Path.Combine(root, "deploy-project.fengproj");
@@ -323,9 +330,169 @@ internal static class ContainerTests
                 Check(deployReport.Success && File.ReadAllBytes(deployOutput).SequenceEqual(deployEdit.Concat(fng)),
                     "Project export after source replacement did not use the baseline.");
             }
+            var deployInfo = ContainerProjectFile.Inspect(deployProjectPath);
+            Check(deployInfo.Version == 3 && deployInfo.Edits.Count == 1 &&
+                deployInfo.SourcePath == deploySourcePath &&
+                ProjectBaselineStore.IsCanonical(deployInfo.BasePath, deployInfo.BaseSha256,
+                    Path.GetFileName(deployInfo.SourcePath)),
+                "Project baseline metadata was not independently cached.");
             File.Delete(deployReopened.BasePath);
+            var missingCacheProbe = ProjectBaselineStore.Probe(deployInfo.BasePath,
+                deployInfo.BaseLength, deployInfo.BaseSha256);
+            var missingSourceProbe = ProjectBaselineStore.Probe(deployInfo.SourcePath,
+                deployInfo.BaseLength, deployInfo.BaseSha256);
+            Check(missingCacheProbe.Status == BaselineProbeStatus.Missing &&
+                missingSourceProbe.Status == BaselineProbeStatus.Missing,
+                "Missing baseline candidates were not diagnosed as missing.");
+            var deployProjectBytes = File.ReadAllBytes(deployProjectPath);
             Reject<ProjectBaselineMissingException>(() => ContainerProjectFile.Load(deployProjectPath),
                 "Missing baseline did not fail with the dedicated error.");
+            Check(File.ReadAllBytes(deployProjectPath).SequenceEqual(deployProjectBytes),
+                "A failed project open modified the project file.");
+            Check(ContainerProjectWriteBack.SavedState(deployProjectPath, deployReopened.Project.Index,
+                    deployReopened.Edits) == "基线缺失",
+                "Missing baseline write-back state was not reported clearly.");
+
+            var recoveredSourcePath = Save("deploy-recovered.bun", deploySourceBytes);
+            var recoveredProbe = ProjectBaselineStore.Probe(recoveredSourcePath,
+                deployInfo.BaseLength, deployInfo.BaseSha256);
+            Check(recoveredProbe.IsMatch, "A byte-identical relocated baseline was not accepted.");
+            var recoveredCache = ProjectBaselineStore.Ensure(recoveredSourcePath, deployInfo.BaseLength,
+                deployInfo.BaseSha256, Path.GetFileName(deployInfo.SourcePath));
+            Check(ProjectBaselineStore.IsCanonical(recoveredCache, deployInfo.BaseSha256,
+                    Path.GetFileName(deployInfo.SourcePath)),
+                "Recovered baseline was not placed in the canonical cache.");
+            var recoveredProject = ContainerProjectFile.Load(deployProjectPath, recoveredCache);
+            Check(recoveredProject.Edits.Count == 1 && recoveredProject.BasePath == recoveredCache &&
+                recoveredProject.BaselineWarning == null,
+                "Project did not reload from the recovered baseline.");
+            var recoveredSavedPath = Path.Combine(root, "deploy-recovered-saved.fengproj");
+            var recoveredSavedBaseline = ContainerProjectFile.Save(recoveredSavedPath,
+                new ContainerProjectSnapshot(recoveredProject.Project, recoveredProject.Edits,
+                    recoveredProject.Textures, recoveredProject.Tabs, recoveredProject.ActiveTab,
+                    recoveredProject.SourcePath, recoveredProject.BasePath));
+            var recoveredSavedInfo = ContainerProjectFile.Inspect(recoveredSavedPath);
+            Check(recoveredSavedBaseline == recoveredCache &&
+                ProjectBaselineStore.IsCanonical(recoveredSavedInfo.BasePath, recoveredSavedInfo.BaseSha256,
+                    Path.GetFileName(recoveredSavedInfo.SourcePath)),
+                "Saving after recovery did not retain the canonical cache baseline.");
+            var recoveredSaved = ContainerProjectFile.Load(recoveredSavedPath);
+            Check(recoveredSaved.Edits.Count == 1 && recoveredSaved.BaselineWarning == null,
+                "Saved recovery project did not reopen.");
+            var recoveredOutput = Path.Combine(root, "deploy-recovered-copy.bun");
+            using (var recoveredWrite = ContainerProjectWriteBack.Prepare(recoveredSavedPath, recoveredOutput))
+            {
+                var recoveredReport = recoveredWrite.Execute();
+                Check(recoveredReport.Success &&
+                    File.ReadAllBytes(recoveredOutput).SequenceEqual(deployEdit.Concat(fng)),
+                    "Project recovery did not support a later export.");
+            }
+
+            var wrongBaseline = Save("wrong-baseline.bun", fng);
+            var wrongProbe = ProjectBaselineStore.Probe(wrongBaseline, deployInfo.BaseLength,
+                deployInfo.BaseSha256);
+            Check(wrongProbe.Status != BaselineProbeStatus.Match,
+                "An unrelated container was accepted as a baseline.");
+            var cacheBytesBeforeWrong = File.ReadAllBytes(recoveredCache);
+            var projectBytesBeforeWrong = File.ReadAllBytes(deployProjectPath);
+            Reject<InvalidDataException>(() => ProjectBaselineStore.Ensure(wrongBaseline,
+                deployInfo.BaseLength, deployInfo.BaseSha256, "wrong-baseline.bun"),
+                "An unrelated container was copied into the baseline cache.");
+            Check(File.ReadAllBytes(recoveredCache).SequenceEqual(cacheBytesBeforeWrong) &&
+                File.ReadAllBytes(deployProjectPath).SequenceEqual(projectBytesBeforeWrong),
+                "A rejected candidate modified the project or cache.");
+
+            var fallbackFng = MakeFngWithObject("Fallback.fng", 1f);
+            var fallbackSourcePath = Save("fallback-source.bun", fallbackFng.Concat(fng).ToArray());
+            var fallbackSourceBytes = File.ReadAllBytes(fallbackSourcePath);
+            var fallbackProject = ContainerProject.Open(fallbackSourcePath);
+            var fallbackSource = fallbackProject.ReadFng(fallbackProject.Index.Blocks[0]).Source;
+            var fallbackEdit = ContainerProjectFile.CreateEdit(fallbackSource,
+                MakeFngWithObject("Fallback.fng", 2f));
+            var fallbackProjectPath = Path.Combine(root, "fallback.fengproj");
+            ContainerProjectFile.Save(fallbackProjectPath,
+                new ContainerProjectSnapshot(fallbackProject, new[] { fallbackEdit },
+                    Array.Empty<ContainerTextureOverride>(), Array.Empty<long>(), null));
+            var fallbackInfo = ContainerProjectFile.Inspect(fallbackProjectPath);
+            Check(ProjectBaselineStore.IsCanonical(fallbackInfo.BasePath, fallbackInfo.BaseSha256,
+                    Path.GetFileName(fallbackInfo.SourcePath)),
+                "Initial project save did not create a canonical baseline.");
+            File.Delete(fallbackInfo.BasePath);
+            var fallbackReopened = ContainerProjectFile.Load(fallbackProjectPath);
+            Check(fallbackReopened.BaselineWarning == null &&
+                File.Exists(fallbackInfo.BasePath) &&
+                fallbackReopened.BasePath == fallbackInfo.BasePath,
+                "Opening from a valid source did not create the missing standard cache.");
+            Check(File.ReadAllBytes(fallbackSourcePath).SequenceEqual(fallbackSourceBytes),
+                "Automatic cache creation modified the original source.");
+
+            File.Delete(fallbackInfo.BasePath);
+            var forcedProjectPath = Path.Combine(root, "fallback-forced.fengproj");
+            var forcedBaseline = ContainerProjectFile.Save(forcedProjectPath,
+                new ContainerProjectSnapshot(fallbackProject, new[] { fallbackEdit },
+                    Array.Empty<ContainerTextureOverride>(), Array.Empty<long>(), null,
+                    fallbackSourcePath, fallbackSourcePath));
+            var forcedInfo = ContainerProjectFile.Inspect(forcedProjectPath);
+            Check(forcedInfo.BasePath == forcedBaseline &&
+                ProjectBaselineStore.IsCanonical(forcedInfo.BasePath, forcedInfo.BaseSha256,
+                    Path.GetFileName(forcedInfo.SourcePath)) &&
+                !ContainerSession.PathsEqual(forcedInfo.BasePath, fallbackSourcePath),
+                "Saving with a source-path BasePath did not create an independent cache baseline.");
+            File.Delete(fallbackSourcePath);
+            var forcedReload = ContainerProjectFile.Load(forcedProjectPath);
+            Check(forcedReload.Edits.Count == 1 && File.Exists(forcedReload.BasePath),
+                "Saved project still depended on the original source after baseline migration.");
+            File.WriteAllBytes(fallbackSourcePath, fallbackSourceBytes);
+
+            var changedFng = MakeFngWithObject("Changed.fng", 1f);
+            var changedSourcePath = Save("changed-source.bun", changedFng.Concat(fng).ToArray());
+            var changedProject = ContainerProject.Open(changedSourcePath);
+            var changedProjectPath = Path.Combine(root, "changed-project.fengproj");
+            ContainerProjectFile.Save(changedProjectPath,
+                new ContainerProjectSnapshot(changedProject, Array.Empty<ContainerFngContent>(),
+                    Array.Empty<ContainerTextureOverride>(), Array.Empty<long>(), null));
+            var changedInfo = ContainerProjectFile.Inspect(changedProjectPath);
+            File.Delete(changedInfo.BasePath);
+            File.WriteAllBytes(changedSourcePath, fng);
+            Reject<ProjectBaselineMissingException>(() => ContainerProjectFile.Load(changedProjectPath),
+                "Externally changed original source was used silently.");
+            Check(File.ReadAllBytes(changedSourcePath).SequenceEqual(fng),
+                "Failed recovery modified the externally changed source.");
+
+            var blockedFng = MakeFngWithObject("Blocked-" + Guid.NewGuid().ToString("N")[..8] + ".fng", 1f);
+            var blockedSourcePath = Save("blocked-source.bun", blockedFng.Concat(fng).ToArray());
+            var blockedProject = ContainerProject.Open(blockedSourcePath);
+            var blockedProjectPath = Path.Combine(root, "blocked-project.fengproj");
+            ContainerProjectFile.Save(blockedProjectPath,
+                new ContainerProjectSnapshot(blockedProject, Array.Empty<ContainerFngContent>(),
+                    Array.Empty<ContainerTextureOverride>(), Array.Empty<long>(), null));
+            var blockedInfo = ContainerProjectFile.Inspect(blockedProjectPath);
+            var blockedCacheDirectory = Path.Combine(ProjectBaselineStore.Root,
+                blockedInfo.BaseSha256.ToUpperInvariant());
+            var blockedProjectBytes = File.ReadAllBytes(blockedProjectPath);
+            Directory.Delete(blockedCacheDirectory, recursive: true);
+            File.WriteAllText(blockedCacheDirectory, "blocked");
+            try
+            {
+                var blockedLoad = ContainerProjectFile.Load(blockedProjectPath);
+                Check(!string.IsNullOrWhiteSpace(blockedLoad.BaselineWarning) &&
+                    ContainerSession.PathsEqual(blockedLoad.BasePath, blockedInfo.SourcePath),
+                    "A cache creation failure was reported as a successful cached baseline.");
+                var blockedSavePath = Path.Combine(root, "blocked-save.fengproj");
+                Reject<IOException>(() => ContainerProjectFile.Save(blockedSavePath,
+                    new ContainerProjectSnapshot(blockedProject, Array.Empty<ContainerFngContent>(),
+                        Array.Empty<ContainerTextureOverride>(), Array.Empty<long>(), null)),
+                    "Save reported success although the standard cache could not be created.");
+                Check(!File.Exists(blockedSavePath),
+                    "Save wrote a project despite failing to create the standard cache.");
+                Check(File.ReadAllBytes(blockedProjectPath).SequenceEqual(blockedProjectBytes),
+                    "A failed cache save modified the existing project.");
+            }
+            finally
+            {
+                if (File.Exists(blockedCacheDirectory)) File.Delete(blockedCacheDirectory);
+                if (Directory.Exists(blockedCacheDirectory)) Directory.Delete(blockedCacheDirectory, true);
+            }
             var racedPath = Path.Combine(root, "raced.bun");
             using (var raced = ContainerProjectWriteBack.Prepare(fastProjectPath, racedPath))
             {

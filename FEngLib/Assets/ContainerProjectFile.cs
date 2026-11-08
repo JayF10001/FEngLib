@@ -10,7 +10,18 @@ namespace FEngLib.Assets;
 
 public sealed record ContainerProjectSnapshot(ContainerProject Project, IReadOnlyList<ContainerFngContent> Edits,
     IReadOnlyList<ContainerTextureOverride> Textures, IReadOnlyList<long> Tabs, long? ActiveTab,
-    string SourcePath = null, string BasePath = null);
+    string SourcePath = null, string BasePath = null, string BaselineWarning = null);
+
+public sealed record ContainerProjectEditInfo(long Offset, string PackageName);
+public sealed record ContainerProjectTextureInfo(long FngOffset, uint RequestId, string RequestName);
+
+/// <summary>Read-only project metadata used by recovery UI before a baseline is available.</summary>
+public sealed record ContainerProjectInfo(int Version, string SourcePath, long SourceLength, string SourceSha256,
+    string BasePath, long BaseLength, string BaseSha256, IReadOnlyList<ContainerProjectEditInfo> Edits,
+    IReadOnlyList<ContainerProjectTextureInfo> Textures, int TabCount, long? ActiveTab)
+{
+    public bool HasIndependentBaseline => Version >= 3;
+}
 
 /// <summary>Versioned, sparse ZIP snapshot. ZIP paths are generated from logical offsets.</summary>
 public static class ContainerProjectFile
@@ -47,12 +58,30 @@ public static class ContainerProjectFile
         var provenance = string.IsNullOrWhiteSpace(snapshot.SourcePath)
             ? index.SourcePath
             : Path.GetFullPath(snapshot.SourcePath);
-        var baseline = snapshot.BasePath;
-        if (string.IsNullOrWhiteSpace(baseline) ||
-            !ProjectBaselineStore.Matches(baseline, index.SourceLength, index.SourceSha256))
-            baseline = ProjectBaselineStore.Ensure(project.BaselinePath, index.SourceLength, index.SourceSha256);
-        else
-            baseline = Path.GetFullPath(baseline);
+
+        // A project baseline must live in the content-addressed cache, even when the original
+        // SourcePath is still valid. Otherwise a later game update or source removal can break a
+        // project that was reported as having an independent baseline.
+        var baselineSource = project.BaselinePath;
+        if (!ProjectBaselineStore.Matches(baselineSource, index.SourceLength, index.SourceSha256) &&
+            !string.IsNullOrWhiteSpace(snapshot.BasePath))
+        {
+            try { baselineSource = Path.GetFullPath(snapshot.BasePath); }
+            catch (Exception error) when (error is ArgumentException or NotSupportedException or IOException) { }
+        }
+        string baseline;
+        try
+        {
+            baseline = ProjectBaselineStore.Ensure(baselineSource, index.SourceLength, index.SourceSha256,
+                Path.GetFileName(provenance));
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or
+            ArgumentException or NotSupportedException)
+        {
+            throw new IOException(
+                "无法创建标准基线缓存。请检查本机缓存目录的写入权限和磁盘空间；工程未保存。", error);
+        }
+
         if (!string.Equals(Path.GetExtension(path), Extension, StringComparison.OrdinalIgnoreCase) ||
             ContainerSession.PathsEqual(path, index.SourcePath) ||
             ContainerSession.PathsEqual(path, baseline))
@@ -130,32 +159,51 @@ public static class ContainerProjectFile
         return baseline;
     }
 
-    public static ContainerProjectSnapshot Load(string path)
+    public static ContainerProjectSnapshot Load(string path) => Load(path, null);
+
+    /// <summary>
+    /// Loads a project. A recovered baseline can be supplied explicitly so the retry uses the
+    /// just-verified cache copy instead of resolving the original source again.
+    /// </summary>
+    public static ContainerProjectSnapshot Load(string path, string baselineOverride)
     {
         using var stream = File.OpenRead(path);
         using var zip = new ZipArchive(stream, ZipArchiveMode.Read);
-        var entries = new Dictionary<string, ZipArchiveEntry>(StringComparer.Ordinal);
-        foreach (var entry in zip.Entries)
-            if (!entries.TryAdd(entry.FullName, entry))
-                throw new InvalidDataException("工程包含重复的 ZIP 条目。");
+        var (entries, manifest) = ReadManifest(zip);
+        var (basePath, baseLength, baseSha256) = BaselineOf(manifest);
+        string baseline;
+        if (!string.IsNullOrWhiteSpace(baselineOverride))
+        {
+            baseline = Path.GetFullPath(baselineOverride);
+            if (!ProjectBaselineStore.Matches(baseline, baseLength, baseSha256))
+                throw new ProjectBaselineMissingException(baseline, baseSha256, baseLength,
+                    ProjectBaselineStore.CachePath(baseSha256, Path.GetFileName(manifest.SourcePath)));
+        }
+        else
+        {
+            baseline = ProjectBaselineStore.Resolve(baseSha256, baseLength,
+                Path.GetFileName(manifest.SourcePath), basePath, manifest.SourcePath);
+        }
 
-        var manifest = JsonSerializer.Deserialize<Manifest>(ReadEntry(entries, ManifestName, MaxManifestBytes));
-        if (manifest == null || manifest.Version is not (1 or 2 or 3))
-            throw new NotSupportedException("不支持该工程文件版本。");
-        if (string.IsNullOrWhiteSpace(manifest.SourcePath) || !Path.IsPathFullyQualified(manifest.SourcePath) ||
-            manifest.SourceLength < 0 || string.IsNullOrWhiteSpace(manifest.SourceSha256) ||
-            manifest.Edits == null || manifest.Tabs == null)
-            throw new InvalidDataException("工程清单缺少必填字段。");
-        var hasBase = manifest.Version >= 3;
-        var basePath = hasBase ? manifest.BasePath : manifest.SourcePath;
-        var baseLength = hasBase ? manifest.BaseLength : manifest.SourceLength;
-        var baseSha256 = hasBase ? manifest.BaseSha256 : manifest.SourceSha256;
-        if (string.IsNullOrWhiteSpace(basePath) || !Path.IsPathFullyQualified(basePath) ||
-            baseLength <= 0 || string.IsNullOrWhiteSpace(baseSha256) || baseSha256.Length != 64 ||
-            !baseSha256.All(character => Uri.IsHexDigit(character)))
-            throw new InvalidDataException("工程清单缺少有效的基线记录。");
-        var baseline = ProjectBaselineStore.Resolve(baseSha256, baseLength, Path.GetFileName(manifest.SourcePath),
-            basePath, manifest.SourcePath);
+        string baselineWarning = null;
+        var canonicalName = Path.GetFileName(manifest.SourcePath);
+        if (string.IsNullOrWhiteSpace(canonicalName)) canonicalName = "container.bin";
+        if (!ProjectBaselineStore.IsCanonical(baseline, baseSha256, canonicalName))
+        {
+            try
+            {
+                baseline = ProjectBaselineStore.Ensure(baseline, baseLength, baseSha256, canonicalName);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or
+                ArgumentException or NotSupportedException)
+            {
+                var dependency = ContainerSession.PathsEqual(baseline, manifest.SourcePath)
+                    ? "现有容器文件" : "当前基线文件";
+                baselineWarning =
+                    $"无法创建标准基线缓存。工程当前仍依赖{dependency}。请检查本机缓存目录的写入权限和磁盘空间。";
+            }
+        }
+
         var project = ContainerProject.Open(baseline, baseLength, baseSha256, manifest.SourcePath, baseline);
         using var source = project.OpenVerifiedSource();
         ValidateTabs(project.Index, manifest.Tabs, manifest.ActiveTab);
@@ -197,7 +245,53 @@ public static class ContainerProjectFile
         }
         if (entries.Count != 0) throw new InvalidDataException("工程包含未登记的 ZIP 条目。");
         return new ContainerProjectSnapshot(project, edits.AsReadOnly(), textures.AsReadOnly(),
-            Array.AsReadOnly(manifest.Tabs), manifest.ActiveTab, manifest.SourcePath, baseline);
+            Array.AsReadOnly(manifest.Tabs), manifest.ActiveTab, manifest.SourcePath, baseline, baselineWarning);
+    }
+
+    /// <summary>Reads only the manifest and validates its baseline fields; no baseline is opened.</summary>
+    public static ContainerProjectInfo Inspect(string path)
+    {
+        using var stream = File.OpenRead(path);
+        using var zip = new ZipArchive(stream, ZipArchiveMode.Read);
+        var (_, manifest) = ReadManifest(zip);
+        var (basePath, baseLength, baseSha256) = BaselineOf(manifest);
+        return new ContainerProjectInfo(manifest.Version, manifest.SourcePath, manifest.SourceLength,
+            manifest.SourceSha256, basePath, baseLength, baseSha256,
+            manifest.Edits.Select(edit => new ContainerProjectEditInfo(edit.Offset, edit.PackageName)).ToArray(),
+            (manifest.Textures ?? Array.Empty<TextureRecord>())
+                .Select(texture => new ContainerProjectTextureInfo(texture.FngOffset, texture.RequestId,
+                    texture.RequestName)).ToArray(),
+            manifest.Tabs.Length, manifest.ActiveTab);
+    }
+
+    private static (Dictionary<string, ZipArchiveEntry> Entries, Manifest Manifest) ReadManifest(ZipArchive zip)
+    {
+        var entries = new Dictionary<string, ZipArchiveEntry>(StringComparer.Ordinal);
+        foreach (var entry in zip.Entries)
+            if (!entries.TryAdd(entry.FullName, entry))
+                throw new InvalidDataException("工程包含重复的 ZIP 条目。");
+
+        var manifest = JsonSerializer.Deserialize<Manifest>(ReadEntry(entries, ManifestName, MaxManifestBytes));
+        if (manifest == null || manifest.Version is not (1 or 2 or 3))
+            throw new NotSupportedException("不支持该工程文件版本。");
+        if (string.IsNullOrWhiteSpace(manifest.SourcePath) || !Path.IsPathFullyQualified(manifest.SourcePath) ||
+            manifest.SourceLength < 0 || string.IsNullOrWhiteSpace(manifest.SourceSha256) ||
+            manifest.Edits == null || manifest.Tabs == null)
+            throw new InvalidDataException("工程清单缺少必填字段。");
+        var (basePath, baseLength, baseSha256) = BaselineOf(manifest);
+        if (string.IsNullOrWhiteSpace(basePath) || !Path.IsPathFullyQualified(basePath) ||
+            baseLength <= 0 || string.IsNullOrWhiteSpace(baseSha256) || baseSha256.Length != 64 ||
+            !baseSha256.All(character => Uri.IsHexDigit(character)))
+            throw new InvalidDataException("工程清单缺少有效的基线记录。");
+        return (entries, manifest);
+    }
+
+    private static (string BasePath, long BaseLength, string BaseSha256) BaselineOf(Manifest manifest)
+    {
+        var hasBase = manifest.Version >= 3;
+        return hasBase
+            ? (manifest.BasePath, manifest.BaseLength, manifest.BaseSha256)
+            : (manifest.SourcePath, manifest.SourceLength, manifest.SourceSha256);
     }
 
     private static string EditPath(long offset) => $"fng/{offset:X16}.fng";

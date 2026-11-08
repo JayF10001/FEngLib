@@ -208,13 +208,35 @@ public partial class PackageView
                 "贴图覆盖缺少目标", MessageBoxButtons.OK, MessageBoxIcon.Warning);
 
         var extension = Path.GetExtension(source);
+        var sourceName = Path.GetFileName(_containerProject.Index.SourcePath);
+        if (string.IsNullOrWhiteSpace(sourceName)) sourceName = Path.GetFileName(source);
+        var projectDirectory = Path.GetDirectoryName(_projectFilePath) ?? "";
+        var initialDirectory = projectDirectory;
+        var proposedPath = Path.Combine(projectDirectory, sourceName);
+        if (ContainerSession.PathsEqual(proposedPath, _containerProject.Index.SourcePath) ||
+            ContainerSession.PathsEqual(proposedPath, source) ||
+            File.Exists(proposedPath))
+        {
+            // The default name preserves the original container name. If that would point at
+            // the source/baseline or an existing file, stage exports in a sibling folder rather
+            // than adding a suffix to the name.
+            initialDirectory = Path.Combine(projectDirectory, "Exports");
+            if (File.Exists(Path.Combine(initialDirectory, sourceName)))
+                initialDirectory = Path.Combine(initialDirectory,
+                    DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+            try { Directory.CreateDirectory(initialDirectory); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                initialDirectory = projectDirectory;
+            }
+        }
         using var dialog = new SaveFileDialog
         {
             Title = "生成新的容器副本",
             Filter = $"容器副本 (*{extension})|*{extension}",
             DefaultExt = extension.TrimStart('.'),
-            FileName = Path.GetFileNameWithoutExtension(source) + ".edited" + extension,
-            InitialDirectory = Path.GetDirectoryName(_projectFilePath),
+            FileName = sourceName,
+            InitialDirectory = initialDirectory,
             OverwritePrompt = false
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
@@ -283,6 +305,16 @@ public partial class PackageView
                 textureFailure != null || report.Warnings.Count > 0
                     ? MessageBoxIcon.Warning
                     : MessageBoxIcon.Information);
+        }
+        catch (ProjectBaselineMissingException)
+        {
+            UseWaitCursor = false;
+            _workspace.StatusMessage = "工程基线缺失";
+            MessageBox.Show(this,
+                "工程基线缺失，无法生成容器副本。\n\n" +
+                "请关闭并重新打开该工程，在“恢复工程资源”对话框中选择基线容器后再试。\n\n" +
+                $"工程位置：{_projectFilePath}",
+                "工程基线缺失", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         catch (Exception error)
         {

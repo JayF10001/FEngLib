@@ -23,6 +23,23 @@ public sealed class ProjectBaselineMissingException : IOException
     public string CachePath { get; }
 }
 
+public enum BaselineProbeStatus
+{
+    Match,
+    Missing,
+    LengthMismatch,
+    Sha256Mismatch,
+    Unreadable,
+    InvalidPath
+}
+
+/// <summary>A non-throwing baseline check result used by recovery UI and diagnostics.</summary>
+public sealed record BaselineProbe(string Path, BaselineProbeStatus Status, long? ActualLength,
+    string ActualSha256, string Detail)
+{
+    public bool IsMatch => Status == BaselineProbeStatus.Match;
+}
+
 /// <summary>
 /// Content-addressed, read-only container baselines used by .fengproj files. Keeping the baseline
 /// outside the game directory means exporting and replacing the game file cannot invalidate a
@@ -48,39 +65,93 @@ public static class ProjectBaselineStore
         return Path.Combine(directory, name);
     }
 
-    public static bool Matches(string path, long length, string sha256)
+    public static bool IsCanonical(string path, string sha256, string originalFileName)
     {
-        if (string.IsNullOrWhiteSpace(path) || length < 0 || string.IsNullOrWhiteSpace(sha256))
-            return false;
+        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(originalFileName)) return false;
         try
         {
-            var info = new FileInfo(path);
-            if (!info.Exists || info.Length != length) return false;
-            using var stream = File.OpenRead(path);
-            using var sha = SHA256.Create();
-            return string.Equals(Convert.ToHexString(sha.ComputeHash(stream)), sha256,
+            return string.Equals(Path.GetFullPath(path), CachePath(sha256, originalFileName),
                 StringComparison.OrdinalIgnoreCase);
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or IOException)
         {
             return false;
         }
     }
 
+    /// <summary>Returns a detailed, non-throwing check of one candidate file.</summary>
+    public static BaselineProbe Probe(string path, long expectedLength, string expectedSha256)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return new BaselineProbe(null, BaselineProbeStatus.InvalidPath, null, null, "未指定文件。");
+        string full;
+        try { full = Path.GetFullPath(path); }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or IOException)
+        {
+            return new BaselineProbe(path, BaselineProbeStatus.InvalidPath, null, null, "路径无效。");
+        }
+
+        long actualLength;
+        try
+        {
+            var info = new FileInfo(full);
+            if (!info.Exists)
+                return new BaselineProbe(full, BaselineProbeStatus.Missing, null, null, "文件不存在。");
+            actualLength = info.Length;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or
+            ArgumentException or System.Security.SecurityException)
+        {
+            return new BaselineProbe(full, BaselineProbeStatus.Unreadable, null, null, error.Message);
+        }
+
+        if (actualLength != expectedLength)
+            return new BaselineProbe(full, BaselineProbeStatus.LengthMismatch, actualLength, null,
+                $"文件大小不符：实际 {actualLength:N0} 字节，期望 {expectedLength:N0} 字节。");
+        if (string.IsNullOrWhiteSpace(expectedSha256))
+            return new BaselineProbe(full, BaselineProbeStatus.Sha256Mismatch, actualLength, null,
+                "工程记录缺少基线 SHA256。");
+
+        try
+        {
+            using var stream = File.Open(full, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var sha = SHA256.Create();
+            var actualSha256 = Convert.ToHexString(sha.ComputeHash(stream));
+            return string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase)
+                ? new BaselineProbe(full, BaselineProbeStatus.Match, actualLength, actualSha256,
+                    "文件与工程记录一致。")
+                : new BaselineProbe(full, BaselineProbeStatus.Sha256Mismatch, actualLength, actualSha256,
+                    "文件内容与工程记录不一致（SHA256 不同）。");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or
+            ArgumentException or System.Security.SecurityException)
+        {
+            return new BaselineProbe(full, BaselineProbeStatus.Unreadable, actualLength, null, error.Message);
+        }
+    }
+
+    public static bool Matches(string path, long length, string sha256)
+    {
+        if (string.IsNullOrWhiteSpace(path) || length < 0 || string.IsNullOrWhiteSpace(sha256))
+            return false;
+        return Probe(path, length, sha256).IsMatch;
+    }
+
     /// <summary>
-    /// Copies the source into the content-addressed cache and returns the baseline path. If the
-    /// source is already a valid cached baseline, it is returned unchanged.
+    /// Copies the source into the canonical content-addressed cache and returns the cache path.
+    /// A verified cache entry is preferred so a project never keeps using the original game file
+    /// when an independent baseline already exists.
     /// </summary>
-    public static string Ensure(string sourcePath, long length, string sha256)
+    public static string Ensure(string sourcePath, long length, string sha256, string originalFileName = null)
     {
         sourcePath = Path.GetFullPath(sourcePath);
+        var target = CachePath(sha256,
+            string.IsNullOrWhiteSpace(originalFileName) ? Path.GetFileName(sourcePath) : originalFileName);
+        if (Matches(target, length, sha256)) return target;
         if (!File.Exists(sourcePath)) throw new FileNotFoundException("源容器不存在。", sourcePath);
         if (!Matches(sourcePath, length, sha256))
             throw new InvalidDataException("源容器的大小或 SHA256 与工程记录不符。");
-        if (IsUnderRoot(sourcePath)) return sourcePath;
 
-        var target = CachePath(sha256, Path.GetFileName(sourcePath));
-        if (Matches(target, length, sha256)) return target;
         var directory = Path.GetDirectoryName(target);
         if (string.IsNullOrWhiteSpace(directory)) throw new IOException("无法确定基线缓存目录。");
         Directory.CreateDirectory(directory);
@@ -119,26 +190,43 @@ public static class ProjectBaselineStore
         foreach (var candidate in candidates)
         {
             if (string.IsNullOrWhiteSpace(candidate)) continue;
-            var full = Path.GetFullPath(candidate);
+            string full;
+            try { full = Path.GetFullPath(candidate); }
+            catch (Exception error) when (error is ArgumentException or NotSupportedException or IOException)
+            {
+                continue;
+            }
             if (Matches(full, length, sha256)) return full;
         }
 
         var directory = Path.Combine(Root, (sha256 ?? "").ToUpperInvariant());
-        if (Directory.Exists(directory))
+        try
         {
-            foreach (var file in Directory.EnumerateFiles(directory).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
-                if (Matches(file, length, sha256)) return file;
+            if (Directory.Exists(directory))
+            {
+                foreach (var file in Directory.EnumerateFiles(directory)
+                             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+                    if (Matches(file, length, sha256)) return file;
+            }
         }
-        var expected = !string.IsNullOrWhiteSpace(hintPath)
-            ? Path.GetFullPath(hintPath)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            // Treat an unreadable cache directory exactly like a missing one; the caller reports
+            // the detailed status through Probe when it opens the recovery dialog.
+        }
+
+        var expected = !string.IsNullOrWhiteSpace(hintPath) ? SafeFullPath(hintPath)
             : CachePath(sha256, originalFileName);
         throw new ProjectBaselineMissingException(expected, sha256 ?? "", length,
             CachePath(sha256, originalFileName));
     }
 
-    private static bool IsUnderRoot(string path)
+    private static string SafeFullPath(string path)
     {
-        var root = Path.GetFullPath(Root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        return Path.GetFullPath(path).StartsWith(root, StringComparison.OrdinalIgnoreCase);
+        try { return Path.GetFullPath(path); }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or IOException)
+        {
+            return path;
+        }
     }
 }

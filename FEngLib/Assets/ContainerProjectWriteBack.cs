@@ -132,6 +132,7 @@ public sealed class ContainerProjectWriteBack : IDisposable
         if (string.IsNullOrWhiteSpace(expectedOriginal))
         {
             try { expectedOriginal = ContainerProjectFile.Load(projectPath).Project.BaselinePath; }
+            catch (ProjectBaselineMissingException) { return "基线缺失"; }
             catch (Exception error) when (error is IOException or InvalidDataException or NotSupportedException)
             {
                 expectedOriginal = index.SourcePath;
