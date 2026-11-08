@@ -307,6 +307,92 @@ internal static class ContainerTests
                     "Accepted an existing project output.");
             }
 
+            var fastBaseline = ContainerProjectFile.Inspect(fastProjectPath).BasePath;
+            var exportTexture = ContainerTextureOverride.Create(fastProject.Index.Blocks[0].Offset,
+                0x44440001, "Export.tga", "export.png", onePixelPng, fastBaseline,
+                "FRONTENDTEXTURES", 0, 10, "EXPORT_ICON", 0x12345678, "TEXCOMP_DXTC3");
+            var exportOutput = Path.Combine(root, "export-plan.bun");
+            using (var exportOperation = ContainerProjectWriteBack.Prepare(fastProjectPath, exportOutput))
+            {
+                var unified = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                    fastProject.Index.SourceSha256, exportOutput, exportOperation.Plan,
+                    new[] { exportTexture }, binaryReady: true);
+                Check(unified.IsExecutable && unified.HasFng && unified.HasTextures &&
+                    unified.TextureFailureLeavesFngCopy && unified.Skipped.Count == 0 &&
+                    unified.Blockers.Count == 0,
+                    "Unified export plan did not include both FNG and texture work. " +
+                    $"hasFng={unified.HasFng} hasTextures={unified.HasTextures} " +
+                    $"blockers={string.Join(" | ", unified.Blockers)} " +
+                    $"warnings={string.Join(" | ", unified.Warnings)} " +
+                    $"fngBlockers={string.Join(" | ", unified.FngPlan?.Blockers ?? new System.Collections.Generic.List<string>())} " +
+                    $"fngItems={unified.FngPlan?.Items.Count ?? -1}");
+                var fngOnlyPlan = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                    fastProject.Index.SourceSha256, exportOutput, exportOperation.Plan,
+                    Array.Empty<ContainerTextureOverride>(), binaryReady: true);
+                Check(fngOnlyPlan.IsExecutable && fngOnlyPlan.HasFng && !fngOnlyPlan.HasTextures,
+                    "FNG-only export plan was not executable.");
+            }
+            var textureOnlyOutput = Path.Combine(root, "export-texture-only.bun");
+            var textureOnly = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, textureOnlyOutput, null, new[] { exportTexture },
+                binaryReady: true);
+            Check(textureOnly.IsExecutable && !textureOnly.HasFng && textureOnly.HasTextures,
+                "Texture-only export plan was not executable.");
+            var noWorkOutput = Path.Combine(root, "export-no-work.bun");
+            var noWork = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, noWorkOutput, null,
+                Array.Empty<ContainerTextureOverride>(), binaryReady: true);
+            Check(!noWork.IsExecutable && noWork.Blockers.Any(blocker => blocker.Contains("没有可导出")),
+                "Empty export plan was not blocked.");
+
+            var externalTexture = ContainerTextureOverride.Create(fastProject.Index.Blocks[0].Offset,
+                0x44440002, "External.tga", "external.png", onePixelPng,
+                Path.Combine(root, "external-archive.tpk"), "FRONTENDTEXTURES", 0, 11,
+                "EXTERNAL_ICON", 0x12345679, "TEXCOMP_DXTC3");
+            var externalOutput = Path.Combine(root, "export-external.bun");
+            var externalPlan = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, externalOutput, null, new[] { externalTexture },
+                binaryReady: true);
+            Check(externalPlan.Skipped.Count == 1 && externalPlan.Warnings.Count > 0 &&
+                !externalPlan.HasTextures,
+                "External texture was not listed as a skipped item.");
+            var untargetedTexture = ContainerTextureOverride.Create(fastProject.Index.Blocks[0].Offset,
+                0x44440003, "Untargeted.tga", "untargeted.png", onePixelPng);
+            var untargetedOutput = Path.Combine(root, "export-untargeted.bun");
+            var untargetedPlan = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, untargetedOutput, null, new[] { untargetedTexture },
+                binaryReady: true);
+            Check(untargetedPlan.Skipped.Count == 1 && untargetedPlan.Warnings.Count > 0 &&
+                !untargetedPlan.HasTextures,
+                "Texture override without a target was not listed as skipped.");
+            var unsupportedTexture = ContainerTextureOverride.Create(fastProject.Index.Blocks[0].Offset,
+                0x44440004, "Unsupported.tga", "unsupported.png", onePixelPng, fastBaseline,
+                "FRONTENDTEXTURES", 0, 12, "UNSUPPORTED_ICON", 0x1234567A, "TEXCOMP_UNKNOWN");
+            var unsupportedPlan = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, Path.Combine(root, "export-unsupported.bun"), null,
+                new[] { unsupportedTexture }, binaryReady: true);
+            Check(!unsupportedPlan.IsExecutable &&
+                unsupportedPlan.Blockers.Any(blocker => blocker.Contains("暂不支持")),
+                "Unsupported texture compression was not reported as a blocker.");
+            var noBinaryPlan = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, Path.Combine(root, "export-no-binary.bun"), null,
+                new[] { exportTexture }, binaryReady: false);
+            Check(!noBinaryPlan.IsExecutable &&
+                noBinaryPlan.Blockers.Any(blocker => blocker.Contains("Binary")),
+                "Texture export without Binary was not blocked.");
+            var sourceAsOutput = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, fastBaseline, null, new[] { exportTexture },
+                binaryReady: true);
+            Check(!sourceAsOutput.IsExecutable, "Export plan accepted the baseline as output.");
+            var existingOutput = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, fastOutput, null, new[] { exportTexture },
+                binaryReady: true);
+            Check(!existingOutput.IsExecutable, "Export plan accepted an existing output file.");
+            var wrongExtension = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, Path.Combine(root, "export-wrong.bin"), null,
+                new[] { exportTexture }, binaryReady: true);
+            Check(!wrongExtension.IsExecutable, "Export plan accepted a different container extension.");
+
             var deployOriginal = MakeFngWithObject("DeployTarget.fng", 3f);
             var deployEdit = MakeFngWithObject("DeployTarget.fng", 99f);
             var deploySourcePath = Save("deploy-source.bun", deployOriginal.Concat(fng).ToArray());

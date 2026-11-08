@@ -184,58 +184,14 @@ public partial class PackageView
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes ||
                 !SaveContainerProject(chooseTarget: false)) return;
         }
-        if (_savedFngEdits.Count == 0)
+        if (_savedFngEdits.Count == 0 && _textureOverrides.Count == 0)
         {
-            MessageBox.Show(this, "工程中没有已保存的 FNG 修改。", "生成容器副本", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "工程中没有可导出的 FNG 修改或贴图覆盖。", "生成容器副本",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
         var source = _containerProject.BaselinePath;
-        var currentTextureReplacements = new List<ContainerTextureReplacement>();
-        var externalTextureSources = new List<string>();
-        var untargetedTextures = new List<string>();
-        foreach (var texture in _textureOverrides.Values)
-        {
-            if (!texture.HasTarget)
-            {
-                untargetedTextures.Add(texture.RequestName ?? texture.RequestId.ToString("X8"));
-                continue;
-            }
-            if (!ContainerSession.PathsEqual(texture.TargetArchivePath, source))
-            {
-                externalTextureSources.Add($"{texture.RequestName} → {texture.TargetArchivePath}");
-                continue;
-            }
-            var compression = texture.TargetCompression?.ToUpperInvariant();
-            if (compression is not ("TEXCOMP_DXTC1" or "TEXCOMP_DXTC3" or "TEXCOMP_DXTC5"))
-            {
-                MessageBox.Show(this, $"贴图 {texture.RequestName} 的格式 {texture.TargetCompression} 暂不支持写回。",
-                    "贴图格式不支持", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            currentTextureReplacements.Add(new ContainerTextureReplacement
-            {
-                TpkName = texture.TargetTpkName,
-                TpkOrdinal = texture.TargetTpkOrdinal,
-                TextureOrdinal = texture.TargetTextureOrdinal,
-                TextureName = texture.TargetTextureName,
-                BinKey = texture.TargetBinKey,
-                Compression = texture.TargetCompression,
-                PngData = texture.PngData,
-            });
-        }
-        if (externalTextureSources.Count > 0)
-            MessageBox.Show(this,
-                "以下贴图来自外部档案，不会包含在本次容器副本中：\n\n" +
-                string.Join("\n", externalTextureSources) +
-                "\n\n请用替换对话框的「写入档案副本…」单独生成。",
-                "外部贴图未包含", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        if (untargetedTextures.Count > 0)
-            MessageBox.Show(this,
-                "以下贴图覆盖缺少目标 TPK 身份，无法写回：\n\n" +
-                string.Join("\n", untargetedTextures) +
-                "\n\n请在对应对象上重新选择 PNG 并应用覆盖。",
-                "贴图覆盖缺少目标", MessageBoxButtons.OK, MessageBoxIcon.Warning);
 
         var extension = Path.GetExtension(source);
         var sourceName = Path.GetFileName(_containerProject.Index.SourcePath);
@@ -270,71 +226,149 @@ public partial class PackageView
             OverwritePrompt = false
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        if (File.Exists(dialog.FileName) || Directory.Exists(dialog.FileName))
+        {
+            MessageBox.Show(this, "输出位置已存在；导出不会覆盖现有文件，请选择新的文件名。", "生成容器副本",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        if (ContainerSession.PathsEqual(dialog.FileName, source) ||
+            ContainerSession.PathsEqual(dialog.FileName, _containerProject.Index.SourcePath))
+        {
+            MessageBox.Show(this, "输出副本不能覆盖基线容器或工程记录的来源容器。", "生成容器副本",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        if (!string.Equals(Path.GetExtension(dialog.FileName), Path.GetExtension(source),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            MessageBox.Show(this, $"输出副本必须保留容器扩展名 {Path.GetExtension(source)}。", "生成容器副本",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
 
+        ContainerProjectWriteBack operation = null;
         string ledger = null;
         try
         {
             UseWaitCursor = true;
-            ContainerWriteBackReport report;
-            using (var operation = ContainerProjectWriteBack.Prepare(_projectFilePath, dialog.FileName))
+            ContainerWritePlan fngPlan = null;
+            if (_savedFngEdits.Count > 0)
             {
-                UseWaitCursor = false;
-                var plan = operation.Plan;
-                if (!ContainerSession.PathsEqual(plan.OriginalPath, source) ||
-                    plan.WorkingCopySha256 != _containerProject.Index.SourceSha256)
+                operation = ContainerProjectWriteBack.Prepare(_projectFilePath, dialog.FileName);
+                fngPlan = operation.Plan;
+                if (!ContainerSession.PathsEqual(fngPlan.OriginalPath, source) ||
+                    fngPlan.WorkingCopySha256 != _containerProject.Index.SourceSha256)
                     throw new InvalidDataException("保存的工程来源与当前窗口不一致，请重新打开工程后再试。");
-                using var preview = new WriteBackPreviewDialog(plan);
+            }
+
+            bool binaryReady;
+            try
+            {
+                binaryReady = BinaryRuntime.DirectoryPath != null &&
+                              !string.IsNullOrWhiteSpace(BinaryRuntime.WorkerHostPath);
+            }
+            catch (Exception)
+            {
+                binaryReady = false;
+            }
+            var exportPlan = ContainerExportPlan.Build(source, _containerProject.Index.SourceLength,
+                _containerProject.Index.SourceSha256, dialog.FileName, fngPlan,
+                _textureOverrides.Values, binaryReady);
+            exportPlan.LedgerDirectory = operation?.LedgerDirectory;
+            UseWaitCursor = false;
+            using (var preview = new ContainerExportPreviewDialog(exportPlan))
+            {
                 if (preview.ShowDialog(this) != DialogResult.OK) return;
+            }
+
+            ContainerWriteBackReport fngReport = null;
+            if (exportPlan.HasFng)
+            {
                 ledger = operation.LedgerDirectory;
                 UseWaitCursor = true;
-                report = operation.Execute(message => _workspace.StatusMessage = message);
+                fngReport = operation.Execute(message => _workspace.StatusMessage = message);
                 UseWaitCursor = false;
             }
+
             ContainerTextureWriteBackReport textureReport = null;
             string textureFailure = null;
-            if (currentTextureReplacements.Count > 0)
+            var replacements = exportPlan.Textures.Select(ToTextureReplacement).ToArray();
+            if (replacements.Length > 0)
             {
-                var texturedPath = dialog.FileName + ".texture-tmp";
-                try
+                if (fngReport == null)
                 {
                     UseWaitCursor = true;
-                    textureReport = ContainerTextureWriteBack.Write(dialog.FileName, texturedPath,
-                        currentTextureReplacements);
-                    File.Move(texturedPath, dialog.FileName, true);
-                }
-                catch (Exception textureError)
-                {
-                    textureFailure = textureError.Message;
-                }
-                finally
-                {
-                    UseWaitCursor = false;
-                    if (File.Exists(texturedPath))
+                    try
                     {
-                        try { File.Delete(texturedPath); }
-                        catch (Exception cleanupError) when (cleanupError is IOException or UnauthorizedAccessException) { }
+                        textureReport = ContainerTextureWriteBack.Write(source, dialog.FileName, replacements);
+                    }
+                    catch (Exception textureError)
+                    {
+                        textureFailure = textureError.Message;
+                    }
+                    finally { UseWaitCursor = false; }
+                }
+                else
+                {
+                    var texturedPath = dialog.FileName + ".texture-tmp";
+                    try
+                    {
+                        UseWaitCursor = true;
+                        textureReport = ContainerTextureWriteBack.Write(dialog.FileName, texturedPath, replacements);
+                        File.Move(texturedPath, dialog.FileName, true);
+                    }
+                    catch (Exception textureError)
+                    {
+                        textureFailure = textureError.Message;
+                    }
+                    finally
+                    {
+                        UseWaitCursor = false;
+                        if (File.Exists(texturedPath))
+                        {
+                            try { File.Delete(texturedPath); }
+                            catch (Exception cleanupError) when (cleanupError is IOException or UnauthorizedAccessException) { }
+                        }
                     }
                 }
             }
-            var outputHash = textureReport?.OutputSha256 ?? report.Sha256After;
-            var textureLine = currentTextureReplacements.Count == 0
+
+            if (fngReport == null && textureReport == null)
+            {
+                _workspace.StatusMessage = "贴图写回失败，未生成容器副本";
+                MessageBox.Show(this,
+                    "贴图写回失败，未生成容器副本。\n\n" + (textureFailure ?? "没有可导出的内容。"),
+                    "容器副本导出失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            var outputHash = textureReport?.OutputSha256 ?? fngReport?.Sha256After;
+            var fngLine = fngReport == null
+                ? "无 FNG 修改。"
+                : $"替换 {fngReport.Items.Count} 个 FNG，验证 {fngReport.VerifiedBlockCount} 个容器块。";
+            var textureLine = replacements.Length == 0
                 ? ""
                 : textureReport != null
                     ? $"\n贴图替换 {textureReport.ReplacedCount} 个（已验证）。"
                     : $"\n贴图写回失败，当前副本仅包含 FNG 修改：\n{textureFailure}";
             _workspace.StatusMessage = textureFailure == null
-                ? $"已写回 · {Path.GetFileName(report.WorkingCopyPath)}"
-                : "FNG 已写回 · 贴图写回失败";
+                ? $"已导出 · {Path.GetFileName(exportPlan.OutputPath)}"
+                : fngReport != null ? "FNG 已写入 · 贴图写回失败" : "贴图写回失败";
+            var warnings = (fngReport?.Warnings ?? new List<string>())
+                .Concat(textureReport?.Warnings ?? Array.Empty<string>()).ToArray();
+            var summary = textureFailure == null
+                ? "副本已生成并通过重读验证。"
+                : "FNG 副本已生成并通过重读验证；贴图部分失败。";
             MessageBox.Show(this,
-                $"副本已生成并通过重读验证。\n\n{report.WorkingCopyPath}\n\n" +
-                $"替换 {report.Items.Count} 个 FNG，验证 {report.VerifiedBlockCount} 个容器块。{textureLine}\n\n" +
-                $"副本 SHA256\n{outputHash}\n\n写回账本及备份\n{ledger}" +
-                (report.Warnings.Count == 0 ? "" : "\n\n" + string.Join("\n", report.Warnings)),
-                textureFailure == null ? "容器副本已生成" : "容器副本已生成（贴图失败）",
+                $"{summary}\n\n{exportPlan.OutputPath}\n\n" +
+                fngLine + textureLine + "\n\n" +
+                $"当前副本 SHA256\n{outputHash}\n\n" +
+                (ledger == null ? "" : $"写回账本及备份\n{ledger}\n\n") +
+                (warnings.Length == 0 ? "" : string.Join("\n", warnings)),
+                textureFailure == null ? "容器副本已导出" : "容器副本已导出（贴图失败）",
                 MessageBoxButtons.OK,
-                textureFailure != null || report.Warnings.Count > 0
-                    ? MessageBoxIcon.Warning
-                    : MessageBoxIcon.Information);
+                textureFailure != null ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
         }
         catch (ProjectBaselineMissingException)
         {
@@ -350,16 +384,28 @@ public partial class PackageView
         {
             UseWaitCursor = false;
             var published = error is ContainerWriteBackException writeBack && writeBack.Report.Published;
-            _workspace.StatusMessage = "写回失败";
+            _workspace.StatusMessage = "导出失败";
             MessageBox.Show(this,
                 (published ? "副本已发布，发布后验证或登记失败。\n\n" : "") + error.Message +
                 (ledger == null ? "" : $"\n\n写回账本\n{ledger}"),
-                "容器写回失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                "容器副本导出失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
+            operation?.Dispose();
             UseWaitCursor = false;
             SetFormDetails();
         }
     }
+
+    private static ContainerTextureReplacement ToTextureReplacement(ContainerTextureOverride texture) => new()
+    {
+        TpkName = texture.TargetTpkName,
+        TpkOrdinal = texture.TargetTpkOrdinal,
+        TextureOrdinal = texture.TargetTextureOrdinal,
+        TextureName = texture.TargetTextureName,
+        BinKey = texture.TargetBinKey,
+        Compression = texture.TargetCompression,
+        PngData = texture.PngData,
+    };
 }
