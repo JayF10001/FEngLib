@@ -17,6 +17,34 @@ public partial class PackageView
     private static bool IsProjectPath(string path) =>
         string.Equals(Path.GetExtension(path), ContainerProjectFile.Extension, StringComparison.OrdinalIgnoreCase);
 
+    private static string ProjectBaseName(string sourcePath)
+    {
+        var name = Path.GetFileNameWithoutExtension(sourcePath);
+        if (string.IsNullOrWhiteSpace(name)) name = "project";
+        foreach (var invalid in Path.GetInvalidFileNameChars()) name = name.Replace(invalid, '_');
+        return name;
+    }
+
+    /// <summary>
+    /// Keeps the requested project name unless that file already exists. A collision gets a
+    /// numeric suffix; Ctrl+S still overwrites the currently open project.
+    /// </summary>
+    private static string NextAvailableProjectPath(string path, string currentProjectPath)
+    {
+        if (!File.Exists(path) || ContainerSession.PathsEqual(path, currentProjectPath)) return path;
+        var directory = Path.GetDirectoryName(path);
+        if (string.IsNullOrWhiteSpace(directory)) return path;
+        var name = Path.GetFileNameWithoutExtension(path);
+        var extension = Path.GetExtension(path);
+        if (string.IsNullOrWhiteSpace(extension)) extension = ContainerProjectFile.Extension;
+        for (var index = 2; index < 1000; index++)
+        {
+            var candidate = Path.Combine(directory, $"{name}_{index}{extension}");
+            if (!File.Exists(candidate)) return candidate;
+        }
+        return Path.Combine(directory, $"{name}_{DateTime.Now:yyyyMMdd_HHmmss}{extension}");
+    }
+
     private static Package ParseProjectFng(ContainerFngContent original,
         IReadOnlyDictionary<long, ContainerFngContent> edits)
     {
@@ -31,15 +59,17 @@ public partial class PackageView
         var target = _projectFilePath;
         if (target == null || chooseTarget)
         {
+            var baseName = ProjectBaseName(_containerProject.Index.SourcePath);
             using var dialog = new SaveFileDialog
             {
                 Title = "保存容器工程",
                 Filter = "FEng 工程 (*.fengproj)|*.fengproj",
                 DefaultExt = "fengproj",
-                FileName = Path.GetFileNameWithoutExtension(target ?? _containerProject.Index.SourcePath)
+                FileName = $"{baseName}_{DateTime.Now:yyyyMMdd_HHmm}",
+                OverwritePrompt = false
             };
             if (dialog.ShowDialog(this) != DialogResult.OK) return false;
-            target = dialog.FileName;
+            target = NextAvailableProjectPath(dialog.FileName, _projectFilePath);
         }
 
         var documents = _workspace.Documents.Where(document => ReferenceEquals(document.Project, _containerProject)).ToArray();
