@@ -1,6 +1,8 @@
 using System;
+using System.Buffers.Binary;
 using System.IO;
 using System.Linq;
+using System.Text;
 using FEngLib.Assets;
 using FEngLib.Packages;
 using FEngViewer;
@@ -138,6 +140,20 @@ internal static class TextureTests
             Check(!otherId.IsProjectOverride && otherId.Source == "archive :: TPK",
                 "Project texture override ignored the request ID.");
 
+            var ddsBytes = MakeDds(4, 4, 2, "DXT5");
+            var ddsOverride = ContainerTextureOverride.CreateDds(0x1000, request.ID, request.Name,
+                "replacement.dds", ddsBytes);
+            var ddsResolver = new TextureResolver(new ITextureSource[]
+            {
+                new ProjectTextureOverrideSource(0x1000, new[] { ddsOverride }),
+            });
+            var ddsResult = ddsResolver.Resolve(request);
+            Check(ddsResult.IsProjectOverride && ddsResult.InputKind == TextureInputKind.Dds &&
+                ddsResult.Format == "DXT5" && ddsResult.MipCount == 2 &&
+                ddsResult.Width == 4 && ddsResult.Height == 4 &&
+                ddsResult.Compression == "DDS DXT5",
+                "DDS project override did not preserve its type, format, size or mip count.");
+
             var ambiguousSource = new FakeSource("ambiguous", (_, _) => new TextureLookupResult
             {
                 Status = TextureLookupStatus.Ambiguous,
@@ -186,6 +202,29 @@ internal static class TextureTests
             try { Directory.Delete(root, true); }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
+    }
+
+    private static byte[] MakeDds(int width, int height, int mipCount, string fourCc)
+    {
+        var expected = DdsTextureInfo.ExpectedPayloadLength(width, height, mipCount, fourCc);
+        var data = new byte[DdsTextureInfo.HeaderLength + expected];
+        void Write(int offset, uint value) =>
+            BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(offset, 4), value);
+        Encoding.ASCII.GetBytes("DDS ").CopyTo(data, 0);
+        Write(4, 124);
+        Write(8, 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | 0x80000);
+        Write(12, (uint)height);
+        Write(16, (uint)width);
+        Write(20, (uint)Math.Max(1, expected));
+        Write(24, 1);
+        Write(28, (uint)mipCount);
+        Write(76, 32);
+        Write(80, 4);
+        Encoding.ASCII.GetBytes(fourCc).CopyTo(data, 84);
+        Write(108, 0x1000);
+        for (var i = 0; i < expected; i++)
+            data[DdsTextureInfo.HeaderLength + i] = (byte)(i * 13 + 3);
+        return data;
     }
 
     private static TextureLookupResult Found(byte[] png, string source, string texture) => new()

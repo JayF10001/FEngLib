@@ -1,11 +1,14 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Numerics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using FEngLib;
 using FEngLib.Assets;
 using FEngLib.Objects;
@@ -277,7 +280,7 @@ internal static class ContainerTests
             Check(migrated.SourcePath == fastSourcePath && migrated.BasePath == migratedBaseline &&
                 File.Exists(migratedBaseline) && migrated.Edits.Count == 1,
                 "Version 1 project did not migrate to an independent baseline.");
-            Check(migratedInfo.Version == 3 &&
+            Check(migratedInfo.Version == 4 &&
                 ProjectBaselineStore.IsCanonical(migratedInfo.BasePath, migratedInfo.BaseSha256,
                     Path.GetFileName(migratedInfo.SourcePath)) &&
                 !ContainerSession.PathsEqual(migratedInfo.BasePath, fastSourcePath),
@@ -393,6 +396,183 @@ internal static class ContainerTests
                 new[] { exportTexture }, binaryReady: true);
             Check(!wrongExtension.IsExecutable, "Export plan accepted a different container extension.");
 
+            // DDS parser, project v4 persistence and unified export recognition.
+            var ddsPayload = MakeDds(8, 8, 1, "DXT5");
+            var ddsInfo = DdsTextureInfo.Parse(ddsPayload);
+            Check(ddsInfo.Format == "DXT5" && ddsInfo.Width == 8 && ddsInfo.Height == 8 &&
+                ddsInfo.MipCount == 1 && ddsInfo.PayloadLength == ddsPayload.Length - 128,
+                "DDS header was not parsed.");
+            var multiMipDds = MakeDds(8, 8, 4, "DXT1");
+            Check(DdsTextureInfo.Parse(multiMipDds).MipCount == 4 &&
+                DdsTextureInfo.ExpectedPayloadLength(8, 8, 4, "DXT1") == multiMipDds.Length - 128,
+                "DDS mip chain was not parsed.");
+
+            var dx10 = MakeDds(8, 8, 1, "DXT5");
+            Encoding.ASCII.GetBytes("DX10").CopyTo(dx10, 84);
+            Reject<InvalidDataException>(() => DdsTextureInfo.Parse(dx10), "Accepted a DX10 DDS.");
+            Reject<InvalidDataException>(() => DdsTextureInfo.Parse(
+                MakeDds(8, 8, 1, "DXT5", caps2: 0x200)), "Accepted a DDS cubemap.");
+            Reject<InvalidDataException>(() => DdsTextureInfo.Parse(
+                MakeDds(8, 8, 1, "DXT5", caps2: 0x200000)), "Accepted a DDS volume texture.");
+            Reject<InvalidDataException>(() => DdsTextureInfo.Parse(
+                MakeDds(8, 8, 1, "ABCD")), "Accepted an unknown DDS FourCC.");
+            Reject<InvalidDataException>(() => DdsTextureInfo.Parse(
+                MakeDds(8, 8, 1, "DXT5", payloadLength: 7)), "Accepted a truncated DDS payload.");
+            Reject<InvalidDataException>(() => DdsTextureInfo.Parse(
+                MakeDds(8, 8, 4, "DXT1", payloadLength: 8)), "Accepted a DDS with missing mips.");
+            Reject<InvalidDataException>(() => DdsTextureInfo.Parse(
+                MakeDds(8, 8, 9, "DXT1")), "Accepted too many DDS mips.");
+
+            var ddsOverride = ContainerTextureOverride.CreateDds(fastProject.Index.Blocks[0].Offset,
+                0x44440010, "Dds.tga", "dds-check.dds", ddsPayload, fastBaseline,
+                "FRONTENDTEXTURES", 0, 14, "DDS_ICON", 0x12345680, "TEXCOMP_DXTC5", 8, 8, 1);
+            Check(ddsOverride.InputKind == TextureInputKind.Dds && ddsOverride.Format == "DXT5" &&
+                ddsOverride.MipCount == 1 && ddsOverride.Width == 8 && ddsOverride.Height == 8 &&
+                ddsOverride.Data.SequenceEqual(ddsPayload) && ddsOverride.PngData == null &&
+                ddsOverride.Sha256 == Convert.ToHexString(SHA256.HashData(ddsPayload)),
+                "DDS override did not preserve the original payload.");
+            Reject<InvalidDataException>(() => ContainerTextureOverride.CreateDds(
+                fastProject.Index.Blocks[0].Offset, 0x44440011, "Bad.tga", "bad.dds", ddsPayload,
+                fastBaseline, "FRONTENDTEXTURES", 0, 15, "BAD_ICON", 0, "TEXCOMP_DXTC3", 8, 8, 1),
+                "Accepted a DDS that mismatches the target FourCC.");
+            Reject<InvalidDataException>(() => ContainerTextureOverride.CreateDds(
+                fastProject.Index.Blocks[0].Offset, 0x44440012, "Bad.tga", "bad.dds", ddsPayload,
+                fastBaseline, "FRONTENDTEXTURES", 0, 16, "BAD_ICON", 0, "TEXCOMP_DXTC5", 16, 8, 1),
+                "Accepted a DDS that mismatches the target size.");
+            var twoMipDds = MakeDds(8, 8, 2, "DXT5");
+            Reject<InvalidDataException>(() => ContainerTextureOverride.CreateDds(
+                fastProject.Index.Blocks[0].Offset, 0x44440013, "Bad.tga", "bad.dds", twoMipDds,
+                fastBaseline, "FRONTENDTEXTURES", 0, 17, "BAD_ICON", 0, "TEXCOMP_DXTC5", 8, 8, 1),
+                "Accepted a DDS that mismatches the target mip count.");
+
+            var ddsProjectPath = Path.Combine(root, "dds-project.fengproj");
+            ContainerProjectFile.Save(ddsProjectPath, new ContainerProjectSnapshot(fastProject,
+                Array.Empty<ContainerFngContent>(), new[] { exportTexture, ddsOverride },
+                Array.Empty<long>(), null));
+            var ddsProjectInfo = ContainerProjectFile.Inspect(ddsProjectPath);
+            Check(ddsProjectInfo.Version == 4 && ddsProjectInfo.Textures.Count == 2 &&
+                ddsProjectInfo.Textures.Any(texture => texture.FngOffset == ddsOverride.FngOffset &&
+                    texture.RequestId == ddsOverride.RequestId &&
+                    texture.InputKind == TextureInputKind.Dds && texture.Format == "DXT5" &&
+                    texture.Width == 8 && texture.Height == 8 && texture.MipCount == 1),
+                "Project v4 did not expose the DDS texture record.");
+            using (var zip = ZipFile.OpenRead(ddsProjectPath))
+            {
+                var ddsEntry = zip.GetEntry(
+                    $"textures/{ddsOverride.FngOffset:X16}/{ddsOverride.RequestId:X8}.dds");
+                Check(zip.GetEntry($"textures/{ddsOverride.FngOffset:X16}/{exportTexture.RequestId:X8}.png") != null &&
+                    ddsEntry != null && ddsEntry.Length == ddsPayload.Length,
+                    "Project v4 did not store PNG and DDS payloads under separate paths.");
+                using var stream = ddsEntry.Open();
+                using var reader = new BinaryReader(stream);
+                Check(reader.ReadBytes((int)ddsEntry.Length).SequenceEqual(ddsPayload),
+                    "Project v4 changed the stored DDS bytes.");
+            }
+            var ddsReopened = ContainerProjectFile.Load(ddsProjectPath);
+            var reopenedDds = ddsReopened.Textures.Single(texture => texture.RequestId == ddsOverride.RequestId);
+            Check(reopenedDds.InputKind == TextureInputKind.Dds && reopenedDds.Format == "DXT5" &&
+                reopenedDds.MipCount == 1 && reopenedDds.Width == 8 && reopenedDds.Height == 8 &&
+                reopenedDds.Data.SequenceEqual(ddsPayload) &&
+                ContainerSession.PathsEqual(reopenedDds.TargetArchivePath, ddsReopened.BasePath),
+                "Project v4 did not restore the DDS override or remap its target.");
+
+            var badDdsPayloadPath = Path.Combine(root, "dds-bad-payload.fengproj");
+            File.Copy(ddsProjectPath, badDdsPayloadPath);
+            using (var zip = ZipFile.Open(badDdsPayloadPath, ZipArchiveMode.Update))
+            {
+                var entry = zip.GetEntry($"textures/{ddsOverride.FngOffset:X16}/{ddsOverride.RequestId:X8}.dds");
+                using var stream = entry.Open();
+                stream.Position = DdsTextureInfo.HeaderLength;
+                var value = stream.ReadByte();
+                stream.Position = DdsTextureInfo.HeaderLength;
+                stream.WriteByte((byte)(value ^ 0xFF));
+            }
+            Reject<InvalidDataException>(() => ContainerProjectFile.Load(badDdsPayloadPath),
+                "Accepted a DDS payload whose SHA256 does not match the manifest.");
+            var badDdsMetaPath = Path.Combine(root, "dds-bad-meta.fengproj");
+            File.Copy(ddsProjectPath, badDdsMetaPath);
+            using (var zip = ZipFile.Open(badDdsMetaPath, ZipArchiveMode.Update))
+            using (var manifest = zip.GetEntry("project.json").Open())
+            {
+                var metadata = JsonNode.Parse(manifest);
+                var ddsRecord = metadata["Textures"].AsArray().Single(node =>
+                    node["RequestId"].GetValue<uint>() == ddsOverride.RequestId);
+                ddsRecord["MipCount"] = 2;
+                manifest.SetLength(0);
+                JsonSerializer.Serialize(manifest, metadata);
+            }
+            Reject<InvalidDataException>(() => ContainerProjectFile.Load(badDdsMetaPath),
+                "Accepted a DDS mip count that does not match the stored payload.");
+
+            var legacyPngPath = Path.Combine(root, "legacy-png.fengproj");
+            ContainerProjectFile.Save(legacyPngPath, new ContainerProjectSnapshot(fastProject,
+                Array.Empty<ContainerFngContent>(), new[] { exportTexture },
+                Array.Empty<long>(), null));
+            using (var zip = ZipFile.Open(legacyPngPath, ZipArchiveMode.Update))
+            using (var manifest = zip.GetEntry("project.json").Open())
+            {
+                var metadata = JsonNode.Parse(manifest);
+                metadata["Version"] = 3;
+                foreach (var record in metadata["Textures"].AsArray())
+                {
+                    record.AsObject().Remove("InputKind");
+                    record.AsObject().Remove("Format");
+                    record.AsObject().Remove("MipCount");
+                }
+                manifest.SetLength(0);
+                JsonSerializer.Serialize(manifest, metadata);
+            }
+            var legacyPng = ContainerProjectFile.Load(legacyPngPath);
+            Check(legacyPng.Textures.Single().InputKind == TextureInputKind.Png &&
+                legacyPng.Textures.Single().Format == "PNG" &&
+                legacyPng.Textures.Single().MipCount == 1,
+                "Version 3 texture record was not treated as PNG.");
+            var legacyPngMigrated = Path.Combine(root, "legacy-png-migrated.fengproj");
+            ContainerProjectFile.Save(legacyPngMigrated, new ContainerProjectSnapshot(
+                legacyPng.Project, legacyPng.Edits, legacyPng.Textures, legacyPng.Tabs,
+                legacyPng.ActiveTab));
+            Check(ContainerProjectFile.Inspect(legacyPngMigrated).Version == 4 &&
+                ContainerProjectFile.Load(legacyPngMigrated).Textures.Single().InputKind ==
+                    TextureInputKind.Png,
+                "Version 3 PNG project did not migrate to project v4.");
+
+            var pureDdsOutput = Path.Combine(root, "export-pure-dds.bun");
+            var pureDdsPlan = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, pureDdsOutput, null, new[] { ddsOverride },
+                binaryReady: true);
+            Check(pureDdsPlan.IsExecutable && pureDdsPlan.HasTextures && !pureDdsPlan.HasFng &&
+                pureDdsPlan.DdsTextureCount == 1 && pureDdsPlan.PngTextureCount == 0,
+                "Pure DDS export plan was not executable.");
+            var mixedPlan = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, Path.Combine(root, "export-mixed.bun"), null,
+                new[] { exportTexture, ddsOverride }, binaryReady: true);
+            Check(mixedPlan.IsExecutable && mixedPlan.DdsTextureCount == 1 &&
+                mixedPlan.PngTextureCount == 1,
+                "Mixed PNG+DDS export plan was not executable.");
+            var noBinaryDds = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, Path.Combine(root, "export-dds-no-binary.bun"), null,
+                new[] { ddsOverride }, binaryReady: false);
+            Check(!noBinaryDds.IsExecutable && noBinaryDds.Blockers.Any(blocker => blocker.Contains("Binary")),
+                "DDS export without Binary was not blocked.");
+            var corruptDds = ContainerTextureOverride.CreateDds(fastProject.Index.Blocks[0].Offset,
+                0x44440014, "Corrupt.tga", "corrupt.dds", ddsPayload, fastBaseline,
+                "FRONTENDTEXTURES", 0, 18, "CORRUPT_ICON", 0, "TEXCOMP_DXTC5", 8, 8, 1);
+            Encoding.ASCII.GetBytes("DXT1").CopyTo(corruptDds.Data, 84);
+            var corruptPlan = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, Path.Combine(root, "export-corrupt-dds.bun"), null,
+                new[] { corruptDds }, binaryReady: true);
+            Check(!corruptPlan.IsExecutable && corruptPlan.Blockers.Any(blocker => blocker.Contains("DDS")),
+                "Corrupt DDS payload was not blocked by the export plan.");
+            var externalDds = ContainerTextureOverride.CreateDds(fastProject.Index.Blocks[0].Offset,
+                0x44440015, "ExternalDds.tga", "external.dds", ddsPayload,
+                Path.Combine(root, "external-dds-archive.tpk"), "FRONTENDTEXTURES", 0, 19,
+                "EXTERNAL_DDS_ICON", 0, "TEXCOMP_DXTC5", 8, 8, 1);
+            var externalDdsPlan = ContainerExportPlan.Build(fastBaseline, fastProject.Index.SourceLength,
+                fastProject.Index.SourceSha256, Path.Combine(root, "export-external-dds.bun"), null,
+                new[] { externalDds }, binaryReady: true);
+            Check(externalDdsPlan.Skipped.Count == 1 && !externalDdsPlan.HasTextures,
+                "External DDS target was not skipped.");
+
             var deployOriginal = MakeFngWithObject("DeployTarget.fng", 3f);
             var deployEdit = MakeFngWithObject("DeployTarget.fng", 99f);
             var deploySourcePath = Save("deploy-source.bun", deployOriginal.Concat(fng).ToArray());
@@ -417,7 +597,7 @@ internal static class ContainerTests
                     "Project export after source replacement did not use the baseline.");
             }
             var deployInfo = ContainerProjectFile.Inspect(deployProjectPath);
-            Check(deployInfo.Version == 3 && deployInfo.Edits.Count == 1 &&
+            Check(deployInfo.Version == 4 && deployInfo.Edits.Count == 1 &&
                 deployInfo.SourcePath == deploySourcePath &&
                 ProjectBaselineStore.IsCanonical(deployInfo.BasePath, deployInfo.BaseSha256,
                     Path.GetFileName(deployInfo.SourcePath)),
@@ -612,6 +792,32 @@ internal static class ContainerTests
             Console.Error.WriteLine($"FAIL after {checks} checks: {error}\nFixtures: {root}");
             return 1;
         }
+    }
+
+    private static byte[] MakeDds(int width, int height, int mipCount, string fourCc,
+        uint caps2 = 0, int? payloadLength = null)
+    {
+        var format = fourCc is "DXT1" or "DXT3" or "DXT5" ? fourCc : "DXT5";
+        var expected = DdsTextureInfo.ExpectedPayloadLength(width, height, mipCount, format);
+        var length = payloadLength ?? expected;
+        var data = new byte[DdsTextureInfo.HeaderLength + length];
+        void Write(int offset, uint value) =>
+            BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(offset, 4), value);
+        Encoding.ASCII.GetBytes("DDS ").CopyTo(data, 0);
+        Write(4, 124);
+        Write(8, 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | 0x80000);
+        Write(12, (uint)height);
+        Write(16, (uint)width);
+        Write(20, (uint)Math.Max(1, expected));
+        Write(24, 1);
+        Write(28, (uint)mipCount);
+        Write(76, 32);
+        Write(80, 4);
+        Encoding.ASCII.GetBytes(fourCc).CopyTo(data, 84);
+        Write(108, 0x1000);
+        Write(112, caps2);
+        for (var i = 0; i < length; i++) data[DdsTextureInfo.HeaderLength + i] = (byte)(i * 31 + 7);
+        return data;
     }
 
     private static byte[] MakeFng(string name)
