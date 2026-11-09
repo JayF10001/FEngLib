@@ -13,7 +13,8 @@ public sealed record ContainerProjectSnapshot(ContainerProject Project, IReadOnl
     string SourcePath = null, string BasePath = null, string BaselineWarning = null);
 
 public sealed record ContainerProjectEditInfo(long Offset, string PackageName);
-public sealed record ContainerProjectTextureInfo(long FngOffset, uint RequestId, string RequestName);
+public sealed record ContainerProjectTextureInfo(long FngOffset, uint RequestId, string RequestName,
+    TextureInputKind InputKind, string Format, int Width, int Height, int MipCount);
 
 /// <summary>Read-only project metadata used by recovery UI before a baseline is available.</summary>
 public sealed record ContainerProjectInfo(int Version, string SourcePath, long SourceLength, string SourceSha256,
@@ -27,7 +28,7 @@ public sealed record ContainerProjectInfo(int Version, string SourcePath, long S
 public static class ContainerProjectFile
 {
     public const string Extension = ".fengproj";
-    private const int CurrentVersion = 3;
+    private const int CurrentVersion = 4;
     private const string ManifestName = "project.json";
     private const int MaxManifestBytes = 4 * 1024 * 1024;
     private const int MaxFngBytes = 64 * 1024 * 1024;
@@ -40,6 +41,7 @@ public static class ContainerProjectFile
     private sealed record EditRecord(long Offset, string PackageName, string OriginalSha256, string EditedSha256);
     private sealed record TextureRecord(long FngOffset, uint RequestId, string RequestName,
         int Width, int Height, string SourceName, string Sha256,
+        TextureInputKind InputKind, string Format, int MipCount,
         string TargetArchivePath, string TargetTpkName, int TargetTpkOrdinal,
         int TargetTextureOrdinal, string TargetTextureName, uint TargetBinKey, string TargetCompression);
 
@@ -97,17 +99,21 @@ public static class ContainerProjectFile
             var original = project.ReadFng(edit.Source.Block, source).Source;
             if (original != edit.Source) throw new InvalidDataException("FNG 修改记录与源块不符。");
         }
-        var textures = (snapshot.Textures ?? Array.Empty<ContainerTextureOverride>())
+        var rawTextures = snapshot.Textures ?? Array.Empty<ContainerTextureOverride>();
+        if (rawTextures.Any(texture => texture == null))
+            throw new InvalidDataException("工程包含空的贴图覆盖记录。");
+        var textures = rawTextures
             .Select(texture => RemapTextureTarget(texture, provenance, baseline))
             .ToArray();
         if (textures.Select(texture => (texture.FngOffset, texture.RequestId)).Distinct().Count() != textures.Length ||
-            textures.Sum(texture => (long)texture.PngData.Length) > MaxTexturesBytes)
+            textures.Sum(texture => (long)texture.StoredLength) > MaxTexturesBytes)
             throw new InvalidDataException("工程包含重复或过大的贴图覆盖记录。");
         foreach (var texture in textures)
         {
             FindFng(index, texture.FngOffset);
-            if (texture.PngData == null || texture.PngData.Length > ContainerTextureOverride.MaxPngBytes)
+            if (texture.StoredLength > ContainerTextureOverride.MaxBytes(texture.InputKind))
                 throw new InvalidDataException("工程中的贴图覆盖大小无效。");
+            texture.ValidateStoredPayload();
         }
         var manifest = new Manifest(CurrentVersion, provenance, index.SourceLength, index.SourceSha256,
             baseline, index.SourceLength, index.SourceSha256,
@@ -119,6 +125,7 @@ public static class ContainerProjectFile
             }).ToArray(),
             textures.Select(texture => new TextureRecord(texture.FngOffset, texture.RequestId,
                 texture.RequestName, texture.Width, texture.Height, texture.SourceName, texture.Sha256,
+                texture.InputKind, texture.Format, texture.MipCount,
                 texture.TargetArchivePath, texture.TargetTpkName, texture.TargetTpkOrdinal,
                 texture.TargetTextureOrdinal, texture.TargetTextureName, texture.TargetBinKey,
                 texture.TargetCompression)).ToArray(),
@@ -142,8 +149,9 @@ public static class ContainerProjectFile
                     }
                     foreach (var texture in textures)
                     {
-                        using var entry = zip.CreateEntry(TexturePath(texture.FngOffset, texture.RequestId)).Open();
-                        entry.Write(texture.PngData);
+                        using var entry = zip.CreateEntry(
+                            TexturePath(texture.FngOffset, texture.RequestId, texture.InputKind)).Open();
+                        entry.Write(texture.Data);
                     }
                 }
                 stream.Flush(flushToDisk: true);
@@ -233,14 +241,15 @@ public static class ContainerProjectFile
             FindFng(project.Index, record.FngOffset);
             if (!textureKeys.Add((record.FngOffset, record.RequestId)))
                 throw new InvalidDataException("工程包含重复的贴图覆盖记录。");
-            var bytes = ReadEntry(entries, TexturePath(record.FngOffset, record.RequestId),
-                Math.Min(ContainerTextureOverride.MaxPngBytes, remainingTextures));
+            var (inputKind, format, mipCount) = NormalizeTextureRecord(record, manifest.Version);
+            var bytes = ReadEntry(entries, TexturePath(record.FngOffset, record.RequestId, inputKind),
+                Math.Min(ContainerTextureOverride.MaxBytes(inputKind), remainingTextures));
             remainingTextures -= bytes.Length;
-            var texture = ContainerTextureOverride.Load(record.FngOffset, record.RequestId, record.RequestName,
-                record.Width, record.Height, record.SourceName, bytes, record.Sha256,
-                record.TargetArchivePath, record.TargetTpkName, record.TargetTpkOrdinal,
-                record.TargetTextureOrdinal, record.TargetTextureName, record.TargetBinKey,
-                record.TargetCompression);
+            var texture = ContainerTextureOverride.Load(record.FngOffset, record.RequestId,
+                record.RequestName, record.Width, record.Height, record.SourceName, bytes,
+                record.Sha256, inputKind, format, mipCount, record.TargetArchivePath,
+                record.TargetTpkName, record.TargetTpkOrdinal, record.TargetTextureOrdinal,
+                record.TargetTextureName, record.TargetBinKey, record.TargetCompression);
             textures.Add(RemapTextureTarget(texture, manifest.SourcePath, baseline));
         }
         if (entries.Count != 0) throw new InvalidDataException("工程包含未登记的 ZIP 条目。");
@@ -259,8 +268,12 @@ public static class ContainerProjectFile
             manifest.SourceSha256, basePath, baseLength, baseSha256,
             manifest.Edits.Select(edit => new ContainerProjectEditInfo(edit.Offset, edit.PackageName)).ToArray(),
             (manifest.Textures ?? Array.Empty<TextureRecord>())
-                .Select(texture => new ContainerProjectTextureInfo(texture.FngOffset, texture.RequestId,
-                    texture.RequestName)).ToArray(),
+                .Select(texture =>
+                {
+                    var (inputKind, format, mipCount) = NormalizeTextureRecord(texture, manifest.Version);
+                    return new ContainerProjectTextureInfo(texture.FngOffset, texture.RequestId,
+                        texture.RequestName, inputKind, format, texture.Width, texture.Height, mipCount);
+                }).ToArray(),
             manifest.Tabs.Length, manifest.ActiveTab);
     }
 
@@ -272,7 +285,7 @@ public static class ContainerProjectFile
                 throw new InvalidDataException("工程包含重复的 ZIP 条目。");
 
         var manifest = JsonSerializer.Deserialize<Manifest>(ReadEntry(entries, ManifestName, MaxManifestBytes));
-        if (manifest == null || manifest.Version is not (1 or 2 or 3))
+        if (manifest == null || manifest.Version is not (1 or 2 or 3 or 4))
             throw new NotSupportedException("不支持该工程文件版本。");
         if (string.IsNullOrWhiteSpace(manifest.SourcePath) || !Path.IsPathFullyQualified(manifest.SourcePath) ||
             manifest.SourceLength < 0 || string.IsNullOrWhiteSpace(manifest.SourceSha256) ||
@@ -295,8 +308,30 @@ public static class ContainerProjectFile
     }
 
     private static string EditPath(long offset) => $"fng/{offset:X16}.fng";
-    private static string TexturePath(long fngOffset, uint requestId) =>
-        $"textures/{fngOffset:X16}/{requestId:X8}.png";
+    private static string TexturePath(long fngOffset, uint requestId, TextureInputKind inputKind) =>
+        $"textures/{fngOffset:X16}/{requestId:X8}{(inputKind == TextureInputKind.Dds ? ".dds" : ".png")}";
+
+    private static (TextureInputKind InputKind, string Format, int MipCount) NormalizeTextureRecord(
+        TextureRecord record, int version)
+    {
+        if (record == null) throw new InvalidDataException("工程包含空的贴图覆盖记录。");
+        if (version < 4) return (TextureInputKind.Png, "PNG", 1);
+        if (!Enum.IsDefined(typeof(TextureInputKind), record.InputKind))
+            throw new InvalidDataException("工程的贴图输入类型无效。");
+        if (record.InputKind == TextureInputKind.Dds)
+        {
+            var format = DdsTextureRules.NormalizeFormat(record.Format);
+            if (record.MipCount <= 0)
+                throw new InvalidDataException("工程的 DDS 贴图 mip 数无效。");
+            return (TextureInputKind.Dds, format, record.MipCount);
+        }
+        if (!string.IsNullOrWhiteSpace(record.Format) &&
+            !string.Equals(record.Format, "PNG", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("工程的 PNG 贴图格式记录无效。");
+        if (record.MipCount > 1)
+            throw new InvalidDataException("工程的 PNG 贴图 mip 数无效。");
+        return (TextureInputKind.Png, "PNG", 1);
+    }
 
     private static ContainerTextureOverride RemapTextureTarget(ContainerTextureOverride texture,
         string provenance, string baseline)

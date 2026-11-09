@@ -217,6 +217,7 @@ public static class BinaryRuntime
                     BinKey = Convert.ToUInt32(texture.GetType().GetProperty("BinKey").GetValue(texture)),
                     Width = Convert.ToInt32(texture.GetType().GetProperty("Width").GetValue(texture)),
                     Height = Convert.ToInt32(texture.GetType().GetProperty("Height").GetValue(texture)),
+                    MipCount = Convert.ToInt32(texture.GetType().GetProperty("Mipmaps").GetValue(texture)),
                     Compression = Convert.ToString(texture.GetType().GetProperty("Compression").GetValue(texture)),
                 });
             }
@@ -230,9 +231,13 @@ public static class BinaryRuntime
         return (byte[])Call(texture.Instance.GetType(), texture.Instance, "GetDDSArray", noPalette);
     }
 
-    public static byte[] ExportTexturePng(BinaryTextureInfo texture)
+    public static byte[] ExportTexturePng(BinaryTextureInfo texture) =>
+        DecodeTextureDds(ExportTextureDds(texture, true));
+
+    /// <summary>Decodes a stored DDS payload to PNG through the same DevIL/ILWrapper runtime.</summary>
+    public static byte[] DecodeTextureDds(byte[] dds)
     {
-        var dds = ExportTextureDds(texture, true);
+        if (dds == null || dds.Length == 0) throw new ArgumentException("DDS 数据为空。", nameof(dds));
         var asm = IlRuntime;
         var imageType = asm.GetType("ILWrapper.Enums.ImageType");
         var pngType = Enum.Parse(imageType, "PNG");

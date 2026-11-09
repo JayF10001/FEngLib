@@ -27,6 +27,8 @@ public sealed class BinaryTextureInfo
     public uint BinKey { get; init; }
     public int Width { get; init; }
     public int Height { get; init; }
+    /// <summary>TPK <c>Mipmaps</c> value; 1 means the base level only.</summary>
+    public int MipCount { get; init; }
     public string Compression { get; init; }
 
     private byte[] _png;

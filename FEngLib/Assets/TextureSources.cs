@@ -52,13 +52,19 @@ public sealed class TextureLookupResult
     /// <summary>Extra identity note, e.g. duplicate exact names resolved by archive order.</summary>
     public string Note { get; init; }
 
-    /// <summary>True when a .fengproj texture override produced this result.</summary>
+    /// <summary>True when a .fengproj PNG/DDS texture override produced this result.</summary>
     public bool IsProjectOverride { get; init; }
 
     /// <summary>Dimensions/format for non-TPK sources (project overrides).</summary>
     public int Width { get; init; }
     public int Height { get; init; }
     public string Compression { get; init; }
+
+    /// <summary>Payload kind when a .fengproj override produced this result.</summary>
+    public TextureInputKind InputKind { get; init; } = TextureInputKind.Png;
+    /// <summary>"PNG" or the DDS FourCC for a project override.</summary>
+    public string Format { get; init; }
+    public int MipCount { get; init; } = 1;
 
     public bool IsFound => Status == TextureLookupStatus.Found && PngData is { Length: > 0 };
     public bool IsArchiveEntry => Entry != null;
@@ -111,7 +117,7 @@ public sealed class TextureResolver : ITextureProvider
         }
     }
 
-    /// <summary>Project-level PNG overrides stay above loose PNGs, the current container and archives.</summary>
+    /// <summary>Project-level PNG/DDS overrides stay above loose PNGs, the current container and archives.</summary>
     public void SetProjectOverrideSource(ITextureSource source)
     {
         if (_projectOverride != null) _sources.Remove(_projectOverride);
@@ -162,7 +168,10 @@ public sealed class TextureResolver : ITextureProvider
             }
 
             if (result == null) continue;
-            if (result.IsFound) return result;
+            // A project override stays authoritative even when its DDS preview could not be decoded
+            // (for example Binary/DevIL is not configured); the dialog still shows its metadata.
+            if (result.IsFound || result.IsProjectOverride && result.Status == TextureLookupStatus.Found)
+                return result;
             if (result.Status == TextureLookupStatus.Ambiguous && ambiguous == null)
                 ambiguous = result;
             else if (result.Status == TextureLookupStatus.Error && error == null)

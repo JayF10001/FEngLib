@@ -28,6 +28,8 @@ public sealed class ContainerExportPlan
 
     public bool HasFng => FngPlan?.Items.Any(item => item.IsRunnable) == true;
     public bool HasTextures => Textures.Count > 0;
+    public int DdsTextureCount => Textures.Count(texture => texture.IsDds);
+    public int PngTextureCount => Textures.Count(texture => texture.IsPng);
     public bool IsExecutable => Blockers.Count == 0 && HasFngOrTextures &&
         (FngPlan == null || FngPlan.IsExecutable);
     public bool HasFngOrTextures => HasFng || HasTextures;
@@ -97,9 +99,40 @@ public sealed class ContainerExportPlan
                 plan.Blockers.Add($"贴图 {name} 的格式 {texture.TargetCompression ?? "(未知)"} 暂不支持写回。");
                 continue;
             }
-            if (texture.PngData == null || texture.PngData.Length == 0)
+            if (texture.StoredLength == 0)
             {
-                plan.Blockers.Add($"贴图 {name} 的 PNG 数据为空。");
+                plan.Blockers.Add($"贴图 {name} 的数据为空。");
+                continue;
+            }
+            if (texture.IsDds)
+            {
+                try
+                {
+                    var info = DdsTextureInfo.Parse(texture.Data, texture.SourceName);
+                    if (!string.Equals(info.Format, texture.Format, StringComparison.OrdinalIgnoreCase) ||
+                        info.Width != texture.Width || info.Height != texture.Height ||
+                        info.MipCount != texture.MipCount)
+                    {
+                        plan.Blockers.Add($"贴图 {name} 的 DDS 元数据与覆盖记录不一致。");
+                        continue;
+                    }
+                    var expectedFormat = DdsTextureRules.FormatForCompression(compression);
+                    if (!string.Equals(info.Format, expectedFormat, StringComparison.OrdinalIgnoreCase))
+                    {
+                        plan.Blockers.Add(
+                            $"贴图 {name} 的 DDS 格式 {info.Format} 与目标 {expectedFormat} 不一致。");
+                        continue;
+                    }
+                }
+                catch (Exception error) when (error is InvalidDataException or NotSupportedException)
+                {
+                    plan.Blockers.Add($"贴图 {name} 的 DDS 校验失败：{error.Message}");
+                    continue;
+                }
+            }
+            else if (!string.Equals(texture.Format, "PNG", StringComparison.OrdinalIgnoreCase))
+            {
+                plan.Blockers.Add($"贴图 {name} 的 PNG 格式记录无效。");
                 continue;
             }
             textures.Add(texture);

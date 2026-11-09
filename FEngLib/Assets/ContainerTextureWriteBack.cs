@@ -6,7 +6,6 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 
 namespace FEngLib.Assets;
@@ -19,7 +18,28 @@ public sealed class ContainerTextureReplacement
     public string TextureName { get; init; }
     public uint BinKey { get; init; }
     public string Compression { get; init; }
+    public TextureInputKind InputKind { get; init; }
+    /// <summary>Raw stored payload: PNG bytes for <see cref="TextureInputKind.Png"/>, DDS bytes for DDS.</summary>
+    public byte[] Data { get; init; }
+    public string Format { get; init; }
+    public int Width { get; init; }
+    public int Height { get; init; }
+    public int MipCount { get; init; }
+    /// <summary>Compatibility alias for the original PNG-only API.</summary>
     public byte[] PngData { get; init; }
+
+    internal byte[] Payload => Data ?? PngData;
+}
+
+public sealed class ContainerTextureWriteBackItemReport
+{
+    public string TpkName { get; init; }
+    public string TextureName { get; init; }
+    public TextureInputKind InputKind { get; init; }
+    public string Format { get; init; }
+    public int Width { get; init; }
+    public int Height { get; init; }
+    public int MipCount { get; init; }
 }
 
 public sealed class ContainerTextureWriteBackReport
@@ -31,12 +51,15 @@ public sealed class ContainerTextureWriteBackReport
     public int ReplacedCount { get; init; }
     public int VerifiedCount { get; init; }
     public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<ContainerTextureWriteBackItemReport> Items { get; init; } =
+        Array.Empty<ContainerTextureWriteBackItemReport>();
 }
 
 /// <summary>
-/// Worker-backed TPK texture replacement. The parent process writes PNG files and a request; the
-/// worker loads the container with the Binary/Nikki runtime, imports a DXT DDS into the exact TPK
-/// entry, saves a candidate, re-reads it and publishes a verified copy. The source is never written.
+/// Worker-backed TPK texture replacement. The parent process writes PNG or DDS files and a request;
+/// the worker loads the container with the Binary/Nikki runtime. PNG inputs are encoded through
+/// DevIL, while DDS inputs are handed to the Binary Texture constructor unchanged. The worker saves
+/// a candidate, re-reads it and publishes a verified copy. The source is never written.
 /// </summary>
 public static class ContainerTextureWriteBack
 {
@@ -58,9 +81,9 @@ public static class ContainerTextureWriteBack
             throw new NotSupportedException("当前宿主没有注册 Binary 工作进程入口。");
         foreach (var item in replacements)
         {
-            if (item == null || item.PngData == null || item.PngData.Length == 0 ||
+            if (item == null || item.Payload == null || item.Payload.Length == 0 ||
                 string.IsNullOrWhiteSpace(item.TpkName) || string.IsNullOrWhiteSpace(item.TextureName))
-                throw new InvalidDataException("贴图写回项缺少目标或 PNG 数据。");
+                throw new InvalidDataException("贴图写回项缺少目标或输入数据。");
         }
         using (var source = File.OpenRead(sourcePath))
         using (var reader = new BinaryReader(source))
@@ -90,8 +113,10 @@ public static class ContainerTextureWriteBack
             for (var i = 0; i < replacements.Count; i++)
             {
                 var item = replacements[i];
-                var pngPath = Path.Combine(workspace, $"texture-{i}.png");
-                File.WriteAllBytes(pngPath, item.PngData);
+                var inputKind = item.InputKind;
+                var extension = inputKind == TextureInputKind.Dds ? ".dds" : ".png";
+                var inputPath = Path.Combine(workspace, $"texture-{i}{extension}");
+                File.WriteAllBytes(inputPath, item.Payload);
                 request.Items.Add(new TextureWriteItem
                 {
                     TpkName = item.TpkName,
@@ -100,7 +125,13 @@ public static class ContainerTextureWriteBack
                     TextureName = item.TextureName,
                     BinKey = item.BinKey,
                     Compression = item.Compression,
-                    PngPath = pngPath,
+                    InputKind = inputKind.ToString(),
+                    Format = item.Format,
+                    Width = item.Width,
+                    Height = item.Height,
+                    MipCount = item.MipCount,
+                    PngPath = inputKind == TextureInputKind.Png ? inputPath : null,
+                    DdsPath = inputKind == TextureInputKind.Dds ? inputPath : null,
                 });
             }
             var requestPath = Path.Combine(workspace, "request.json");
@@ -144,6 +175,18 @@ public static class ContainerTextureWriteBack
                 ReplacedCount = workerReport.ReplacedCount,
                 VerifiedCount = workerReport.VerifiedCount,
                 Warnings = workerReport.Warnings ?? new List<string>(),
+                Items = (workerReport.Items ?? new List<TextureWriteReportItem>()).Select(item =>
+                    new ContainerTextureWriteBackItemReport
+                    {
+                        TpkName = item.TpkName,
+                        TextureName = item.TextureName,
+                        InputKind = Enum.TryParse<TextureInputKind>(item.InputKind, true, out var kind)
+                            ? kind : TextureInputKind.Png,
+                        Format = item.Format,
+                        Width = item.Width,
+                        Height = item.Height,
+                        MipCount = item.MipCount,
+                    }).ToArray(),
             };
         }
         finally
@@ -184,6 +227,7 @@ public static class ContainerTextureWriteBack
                       ?? throw new InvalidDataException("Binary Datamap 没有 TPKBlocks。");
         var before = Fingerprint(manager);
         var expected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var reportItems = new List<TextureWriteReportItem>();
         var replaced = 0;
         foreach (var item in request.Items)
         {
@@ -192,20 +236,51 @@ public static class ContainerTextureWriteBack
             if (!string.Equals(oldCompression, item.Compression, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException(
                     $"贴图目标格式不符：{item.TpkName}/{item.TextureName} 期望 {item.Compression}，实际 {oldCompression}。");
-            var dds = BinaryRuntime.EncodeTextureDds(File.ReadAllBytes(item.PngPath), item.Compression);
-            var ddsPath = item.PngPath + ".dds";
-            File.WriteAllBytes(ddsPath, dds);
+            var oldWidth = Convert.ToInt32(target.Texture.GetType().GetProperty("Width")?.GetValue(target.Texture));
+            var oldHeight = Convert.ToInt32(target.Texture.GetType().GetProperty("Height")?.GetValue(target.Texture));
+            var targetMipCount = Math.Max(1, TextureMipCount(target.Texture));
+            var inputKind = IsDds(item) ? TextureInputKind.Dds : TextureInputKind.Png;
+            byte[] inputDds;
+            string ddsPath;
+            if (inputKind == TextureInputKind.Dds)
+            {
+                inputDds = ReadDdsPayload(item);
+                var info = DdsTextureInfo.Parse(inputDds, item.TextureName);
+                info.ValidateAgainstTarget(item.Compression, oldWidth, oldHeight, targetMipCount,
+                    item.TpkName + "/" + item.TextureName);
+                ValidateExpectedDds(info, item);
+                // Always stage a workspace copy: the user's DDS file is never handed to Binary.
+                ddsPath = Path.Combine(Path.GetDirectoryName(requestPath) ?? ".",
+                    "dds-" + Guid.NewGuid().ToString("N") + ".dds");
+                File.WriteAllBytes(ddsPath, inputDds);
+            }
+            else
+            {
+                inputDds = BinaryRuntime.EncodeTextureDds(File.ReadAllBytes(item.PngPath), item.Compression);
+                ddsPath = item.PngPath + ".dds";
+                File.WriteAllBytes(ddsPath, inputDds);
+            }
+
             var textureType = asm.GetType("Nikki.Support.MostWanted.Class.Texture")
                               ?? throw new InvalidDataException("Binary 运行库缺少 MostWanted Texture。");
             var replacement = Activator.CreateInstance(textureType, item.TextureName, ddsPath, target.Tpk)
                               ?? throw new InvalidDataException("无法创建替换 Texture。");
             var width = Convert.ToInt32(replacement.GetType().GetProperty("Width")?.GetValue(replacement));
             var height = Convert.ToInt32(replacement.GetType().GetProperty("Height")?.GetValue(replacement));
-            var oldWidth = Convert.ToInt32(target.Texture.GetType().GetProperty("Width")?.GetValue(target.Texture));
-            var oldHeight = Convert.ToInt32(target.Texture.GetType().GetProperty("Height")?.GetValue(target.Texture));
             if (width != oldWidth || height != oldHeight)
                 throw new InvalidDataException(
                     $"贴图尺寸不符：{item.TpkName}/{item.TextureName} 期望 {oldWidth}x{oldHeight}，实际 {width}x{height}。");
+            if (inputKind == TextureInputKind.Dds)
+            {
+                var info = DdsTextureInfo.Parse(inputDds, item.TextureName);
+                var replacementMipCount = TextureMipCount(replacement);
+                var replacementData = (byte[])replacement.GetType().GetProperty("Data")?.GetValue(replacement);
+                if (replacementMipCount != info.MipCount || replacementMipCount != targetMipCount ||
+                    replacementData == null ||
+                    !replacementData.AsSpan().SequenceEqual(inputDds.AsSpan(DdsTextureInfo.HeaderLength)))
+                    throw new InvalidDataException(
+                        $"DDS 替换后的格式、mip 或像素数据与输入不符：{item.TpkName}/{item.TextureName}。");
+            }
             target.Textures[target.Index] = replacement;
             expected.Add(target.Key);
             replaced++;
@@ -228,28 +303,48 @@ public static class ContainerTextureWriteBack
         var changed = before.Keys.Union(after.Keys)
             .Where(key => !before.TryGetValue(key, out var a) || !after.TryGetValue(key, out var b) || a != b)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (!changed.SetEquals(expected))
-            throw new InvalidDataException("贴图写回后的指纹变化与目标不一致：" + string.Join(", ", changed));
+        // A byte-identical replacement legitimately leaves the target fingerprint unchanged; the
+        // per-item verification below still proves the target entry contains the requested bytes.
+        var unexpectedChanges = changed.Except(expected, StringComparer.OrdinalIgnoreCase).ToArray();
+        if (unexpectedChanges.Length > 0)
+            throw new InvalidDataException("贴图写回后的指纹变化与目标不一致：" +
+                                           string.Join(", ", unexpectedChanges));
         foreach (var item in request.Items)
         {
             var target = Find(verifyManager, item);
             var compression = Convert.ToString(target.Texture.GetType().GetProperty("Compression")?.GetValue(target.Texture));
             var dds = (byte[])BinaryRuntime.Call(target.Texture.GetType(), target.Texture, "GetDDSArray", true);
-            var fourCc = Encoding.ASCII.GetString(dds, 84, 4);
-            var expectedFourCc = item.Compression.ToUpperInvariant() switch
-            {
-                "TEXCOMP_DXTC1" => "DXT1",
-                "TEXCOMP_DXTC3" => "DXT3",
-                "TEXCOMP_DXTC5" => "DXT5",
-                _ => throw new NotSupportedException("不支持写回的格式：" + item.Compression),
-            };
+            var expectedFourCc = DdsTextureRules.FormatForCompression(item.Compression)
+                                 ?? throw new NotSupportedException("不支持写回的格式：" + item.Compression);
+            var actual = DdsTextureInfo.Parse(dds, item.TpkName + "/" + item.TextureName);
             if (!string.Equals(compression, item.Compression, StringComparison.OrdinalIgnoreCase) ||
-                fourCc != expectedFourCc)
+                !string.Equals(actual.Format, expectedFourCc, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException($"贴图写回验证失败：{item.TpkName}/{item.TextureName}。");
+            var inputDds = IsDds(item) ? ReadDdsPayload(item) : File.ReadAllBytes(item.PngPath + ".dds");
+            var input = DdsTextureInfo.Parse(inputDds, item.TextureName);
+            if (actual.Width != input.Width || actual.Height != input.Height)
+                throw new InvalidDataException(
+                    $"贴图写回后的尺寸不一致：{item.TpkName}/{item.TextureName}。");
+            if (IsDds(item) &&
+                (actual.MipCount != input.MipCount ||
+                 actual.MipCount != Math.Max(1, TextureMipCount(target.Texture))))
+                throw new InvalidDataException(
+                    $"贴图写回后的 mip 数不一致：{item.TpkName}/{item.TextureName}。");
             var data = (byte[])target.Texture.GetType().GetProperty("Data")?.GetValue(target.Texture);
-            var inputDds = File.ReadAllBytes(item.PngPath + ".dds");
-            if (data == null || inputDds.Length < 128 || !data.AsSpan().SequenceEqual(inputDds.AsSpan(128)))
+            if (data == null || inputDds.Length < DdsTextureInfo.HeaderLength ||
+                !data.AsSpan().SequenceEqual(inputDds.AsSpan(DdsTextureInfo.HeaderLength)))
                 throw new InvalidDataException($"贴图写回后的像素数据不一致：{item.TpkName}/{item.TextureName}。");
+            reportItems.Add(new TextureWriteReportItem
+            {
+                TpkName = item.TpkName,
+                TextureName = Convert.ToString(target.Texture.GetType()
+                    .GetProperty("CollectionName")?.GetValue(target.Texture)) ?? item.TextureName,
+                InputKind = IsDds(item) ? TextureInputKind.Dds.ToString() : TextureInputKind.Png.ToString(),
+                Format = actual.Format,
+                Width = actual.Width,
+                Height = actual.Height,
+                MipCount = actual.MipCount,
+            });
         }
 
         File.Move(request.Candidate, request.Output, overwrite: true);
@@ -262,6 +357,7 @@ public static class ContainerTextureWriteBack
             ReplacedCount = replaced,
             VerifiedCount = request.Items.Count,
             Warnings = new List<string>(),
+            Items = reportItems,
         };
         File.WriteAllText(requestPath + ".report.json",
             JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
@@ -327,6 +423,34 @@ public static class ContainerTextureWriteBack
         return result;
     }
 
+    private static bool IsDds(TextureWriteItem item) =>
+        string.Equals(item.InputKind, TextureInputKind.Dds.ToString(), StringComparison.OrdinalIgnoreCase);
+
+    private static byte[] ReadDdsPayload(TextureWriteItem item)
+    {
+        if (item.DdsData is { Length: > 0 }) return item.DdsData;
+        if (!string.IsNullOrWhiteSpace(item.DdsPath) && File.Exists(item.DdsPath))
+            return File.ReadAllBytes(item.DdsPath);
+        throw new InvalidDataException("DDS 写回项缺少 DdsPath/DdsData。");
+    }
+
+    private static void ValidateExpectedDds(DdsTextureInfo info, TextureWriteItem item)
+    {
+        if (!string.IsNullOrWhiteSpace(item.Format) &&
+            !string.Equals(info.Format, item.Format, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException(
+                $"DDS 输入格式与写回记录不符：记录 {item.Format}，文件 {info.Format}。");
+        if (item.Width > 0 && info.Width != item.Width || item.Height > 0 && info.Height != item.Height)
+            throw new InvalidDataException(
+                $"DDS 输入尺寸与写回记录不符：记录 {item.Width} × {item.Height}，文件 {info.Width} × {info.Height}。");
+        if (item.MipCount > 0 && info.MipCount != item.MipCount)
+            throw new InvalidDataException(
+                $"DDS 输入 mip 数与写回记录不符：记录 {item.MipCount}，文件 {info.MipCount}。");
+    }
+
+    private static int TextureMipCount(object texture) =>
+        Convert.ToInt32(texture.GetType().GetProperty("Mipmaps")?.GetValue(texture));
+
     private sealed class TextureWriteRequest
     {
         public string Source { get; set; }
@@ -344,7 +468,25 @@ public static class ContainerTextureWriteBack
         public string TextureName { get; set; }
         public uint BinKey { get; set; }
         public string Compression { get; set; }
+        public string InputKind { get; set; } = TextureInputKind.Png.ToString();
+        public string Format { get; set; }
+        public int Width { get; set; }
+        public int Height { get; set; }
+        public int MipCount { get; set; }
         public string PngPath { get; set; }
+        public string DdsPath { get; set; }
+        public byte[] DdsData { get; set; }
+    }
+
+    private sealed class TextureWriteReportItem
+    {
+        public string TpkName { get; set; }
+        public string TextureName { get; set; }
+        public string InputKind { get; set; }
+        public string Format { get; set; }
+        public int Width { get; set; }
+        public int Height { get; set; }
+        public int MipCount { get; set; }
     }
 
     private sealed class TextureWriteReport
@@ -356,5 +498,6 @@ public static class ContainerTextureWriteBack
         public int ReplacedCount { get; set; }
         public int VerifiedCount { get; set; }
         public List<string> Warnings { get; set; }
+        public List<TextureWriteReportItem> Items { get; set; } = new();
     }
 }
