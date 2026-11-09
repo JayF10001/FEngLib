@@ -113,8 +113,6 @@ public partial class PackageView
         foreach (var edit in edits) _savedFngEdits.Add(edit.Key, edit.Value);
         foreach (var document in modified) document.MarkEditsSaved();
         _textureOverridesDirty = false;
-        RememberRecentContainer(_containerProject.Index.SourcePath);
-        RememberRecentProject(_projectFilePath);
         var baselineCreated = !ContainerSession.PathsEqual(previousBaseline, baseline) &&
                               !ContainerSession.PathsEqual(provenance, baseline);
         _workspace.StatusMessage = baselineCreated
@@ -180,13 +178,13 @@ public partial class PackageView
         if (_containerProject == null || !ValidateChildren()) return;
         if (_projectFilePath == null || _workspace.DirtyCount > 0 || _textureOverridesDirty)
         {
-            if (MessageBox.Show(this, "生成副本使用已保存的工程。是否先保存当前工程？", "生成容器副本",
+            if (MessageBox.Show(this, "导出容器使用已保存的工程。是否先保存当前工程？", "导出容器",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes ||
                 !SaveContainerProject(chooseTarget: false)) return;
         }
         if (_savedFngEdits.Count == 0 && _textureOverrides.Count == 0)
         {
-            MessageBox.Show(this, "工程中没有可导出的 FNG 修改或贴图覆盖。", "生成容器副本",
+            MessageBox.Show(this, "工程中没有可导出的 FNG 修改或贴图覆盖。", "导出容器",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -218,7 +216,7 @@ public partial class PackageView
         }
         using var dialog = new SaveFileDialog
         {
-            Title = "生成新的容器副本",
+            Title = "导出容器",
             Filter = $"容器副本 (*{extension})|*{extension}",
             DefaultExt = extension.TrimStart('.'),
             FileName = sourceName,
@@ -228,21 +226,21 @@ public partial class PackageView
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         if (File.Exists(dialog.FileName) || Directory.Exists(dialog.FileName))
         {
-            MessageBox.Show(this, "输出位置已存在；导出不会覆盖现有文件，请选择新的文件名。", "生成容器副本",
+            MessageBox.Show(this, "输出位置已存在；导出不会覆盖现有文件，请选择新的文件名。", "导出容器",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
         if (ContainerSession.PathsEqual(dialog.FileName, source) ||
             ContainerSession.PathsEqual(dialog.FileName, _containerProject.Index.SourcePath))
         {
-            MessageBox.Show(this, "输出副本不能覆盖基线容器或工程记录的来源容器。", "生成容器副本",
+            MessageBox.Show(this, "输出副本不能覆盖基线容器或工程记录的来源容器。", "导出容器",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
         if (!string.Equals(Path.GetExtension(dialog.FileName), Path.GetExtension(source),
                 StringComparison.OrdinalIgnoreCase))
         {
-            MessageBox.Show(this, $"输出副本必须保留容器扩展名 {Path.GetExtension(source)}。", "生成容器副本",
+            MessageBox.Show(this, $"输出副本必须保留容器扩展名 {Path.GetExtension(source)}。", "导出容器",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
@@ -336,10 +334,10 @@ public partial class PackageView
 
             if (fngReport == null && textureReport == null)
             {
-                _workspace.StatusMessage = "贴图写回失败，未生成容器副本";
+                _workspace.StatusMessage = "贴图导出失败，未生成容器副本";
                 MessageBox.Show(this,
-                    "贴图写回失败，未生成容器副本。\n\n" + (textureFailure ?? "没有可导出的内容。"),
-                    "容器副本导出失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    "贴图导出失败，未生成容器副本。\n\n" + (textureFailure ?? "没有可导出的内容。"),
+                    "导出容器失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
@@ -350,11 +348,12 @@ public partial class PackageView
             var textureLine = replacements.Length == 0
                 ? ""
                 : textureReport != null
-                    ? $"\n贴图替换 {textureReport.ReplacedCount} 个（已验证）。"
-                    : $"\n贴图写回失败，当前副本仅包含 FNG 修改：\n{textureFailure}";
+                    ? $"\n贴图替换 {textureReport.ReplacedCount} 个（已验证）。" +
+                      DescribeTextureWriteBack(textureReport)
+                    : $"\n贴图导出失败，当前副本仅包含 FNG 修改：\n{textureFailure}";
             _workspace.StatusMessage = textureFailure == null
                 ? $"已导出 · {Path.GetFileName(exportPlan.OutputPath)}"
-                : fngReport != null ? "FNG 已写入 · 贴图写回失败" : "贴图写回失败";
+                : fngReport != null ? "FNG 已写入 · 贴图导出失败" : "贴图导出失败";
             var warnings = (fngReport?.Warnings ?? new List<string>())
                 .Concat(textureReport?.Warnings ?? Array.Empty<string>()).ToArray();
             var summary = textureFailure == null
@@ -375,7 +374,7 @@ public partial class PackageView
             UseWaitCursor = false;
             _workspace.StatusMessage = "工程基线缺失";
             MessageBox.Show(this,
-                "工程基线缺失，无法生成容器副本。\n\n" +
+                "工程基线缺失，无法导出容器。\n\n" +
                 "请关闭并重新打开该工程，在“恢复工程资源”对话框中选择基线容器后再试。\n\n" +
                 $"工程位置：{_projectFilePath}",
                 "工程基线缺失", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -388,7 +387,7 @@ public partial class PackageView
             MessageBox.Show(this,
                 (published ? "副本已发布，发布后验证或登记失败。\n\n" : "") + error.Message +
                 (ledger == null ? "" : $"\n\n写回账本\n{ledger}"),
-                "容器副本导出失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                "导出容器失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
@@ -396,6 +395,19 @@ public partial class PackageView
             UseWaitCursor = false;
             SetFormDetails();
         }
+    }
+
+    private static string DescribeTextureWriteBack(ContainerTextureWriteBackReport report)
+    {
+        if (report?.Items == null || report.Items.Count == 0) return "";
+        var lines = report.Items.Take(6).Select(item =>
+        {
+            var kind = item.InputKind == FEngLib.Assets.TextureInputKind.Dds
+                ? $"DDS {item.Format} · {item.MipCount} mip"
+                : "PNG";
+            return $"\n  · {item.TextureName}：{kind} · {item.Width} × {item.Height}";
+        }).ToArray();
+        return string.Join("", lines) + (report.Items.Count > 6 ? "\n  ……" : "");
     }
 
     private static ContainerTextureReplacement ToTextureReplacement(ContainerTextureOverride texture) => new()
@@ -406,6 +418,11 @@ public partial class PackageView
         TextureName = texture.TargetTextureName,
         BinKey = texture.TargetBinKey,
         Compression = texture.TargetCompression,
-        PngData = texture.PngData,
+        InputKind = texture.InputKind,
+        Data = texture.Data,
+        Format = texture.Format,
+        Width = texture.Width,
+        Height = texture.Height,
+        MipCount = texture.MipCount,
     };
 }

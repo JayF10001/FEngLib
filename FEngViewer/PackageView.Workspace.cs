@@ -78,6 +78,9 @@ public partial class PackageView
     private ToolStripMenuItem _saveMenu;
     private ToolStripMenuItem _saveAsMenu;
     private ToolStripMenuItem _saveAllMenu;
+    private ToolStripMenuItem _exportFngMenu;
+    private ToolStripSeparator _exportGroupSeparator;
+    private ToolStripMenuItem _toolsMenu;
     private ToolStripMenuItem _legacyWriteBackMenu;
     private ToolStripMenuItem _cleanupMenu;
     private ToolStripMenuItem _containerIndexMenu;
@@ -112,7 +115,6 @@ public partial class PackageView
             if (_legacyFiles.Contains(save.Document.SourcePath)) _writeBack.PrepareSave(save);
         };
         _workspace.SaveFinished += (_, save) => _writeBack.FinishSave(save);
-        _workspace.Saved += (_, document) => RememberRecentDocument(document);
         _writeBack.ConfirmVersionSwitch = message => MessageBox.Show(this, message,
             "切换待写回版本", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
         _boldNodeFont = new Font(treeView1.Font, FontStyle.Bold);
@@ -392,38 +394,44 @@ public partial class PackageView
     {
         var items = FileMenuItem.DropDownItems;
         items.Clear();
-        items.Add(CreateMenuItem("Open FNG...", Keys.Control | Keys.O, (_, _) => OpenFilesDialog()));
-        items.Add(CreateMenuItem("Open container...", Keys.None, OpenContainerMenuItem_Click));
-        items.Add(CreateMenuItem("Open FNG folder...", Keys.None, (_, _) => OpenFngFolder()));
+        items.Add(CreateMenuItem("打开 FNG…", Keys.Control | Keys.O, (_, _) => OpenFilesDialog()));
+        items.Add(CreateMenuItem("打开容器或工程…", Keys.None, OpenContainerMenuItem_Click));
+        items.Add(CreateMenuItem("加入 FNG 文件夹…", Keys.None, (_, _) => OpenFngFolder()));
         _recentDocumentsMenu = new ToolStripMenuItem("最近打开(&R)") { Enabled = false };
         items.Add(_recentDocumentsMenu);
         FileMenuItem.DropDownOpening += (_, _) => RefreshRecentDocumentsMenu();
         items.Add(new ToolStripSeparator());
-        _saveMenu = CreateMenuItem("Save", Keys.Control | Keys.S, (_, _) => SaveActiveDocument(false));
-        _saveAsMenu = CreateMenuItem("Save as...", Keys.Control | Keys.Shift | Keys.S, (_, _) => SaveActiveDocument(true));
-        _saveAllMenu = CreateMenuItem("Save all modified FNG", Keys.None, (_, _) => SaveAllModifiedDocuments());
+        _saveMenu = CreateMenuItem("保存", Keys.Control | Keys.S, (_, _) => SaveActiveDocument(false));
+        _saveAsMenu = CreateMenuItem("另存为…", Keys.Control | Keys.Shift | Keys.S, (_, _) => SaveActiveDocument(true));
+        _saveAllMenu = CreateMenuItem("全部保存", Keys.None, (_, _) => SaveAllModifiedDocuments());
         items.AddRange(new ToolStripItem[] { _saveMenu, _saveAsMenu, _saveAllMenu });
-        items.Add(CreateMenuItem("导出 FNG…", Keys.None, (_, _) => ExportFng(_workspace.Active)));
-        items.Add(CreateMenuItem("Reload", Keys.Control | Keys.Shift | Keys.R, (_, _) => ReloadActiveDocument()));
+        items.Add(new ToolStripSeparator());
+        _exportFngMenu = CreateMenuItem("导出 FNG…", Keys.None, (_, _) => ExportFng(_workspace.Active));
+        items.Add(_exportFngMenu);
+        _projectWriteBackMenu = CreateMenuItem("导出容器…", Keys.None, (_, _) => GenerateContainerCopy());
+        items.Add(_projectWriteBackMenu);
+        _exportGroupSeparator = new ToolStripSeparator();
+        items.Add(_exportGroupSeparator);
+        items.Add(CreateMenuItem("重新加载", Keys.Control | Keys.Shift | Keys.R, (_, _) => ReloadActiveDocument()));
         _restoreBackupMenu = CreateMenuItem("从备份恢复…", Keys.None, (_, _) => RestoreActiveBackup());
         items.Add(_restoreBackupMenu);
         items.Add(new ToolStripSeparator());
-        items.Add(CreateMenuItem("配置 Binary 运行库…", Keys.None, (_, _) => ConfigureBinaryRuntime()));
-        _containerIndexMenu = CreateMenuItem("查看容器块索引…", Keys.None, (_, _) => ShowContainerBlockIndex());
-        _projectWriteBackMenu = CreateMenuItem("生成容器副本…", Keys.None, (_, _) => GenerateContainerCopy());
+        items.Add(CreateMenuItem("关闭标签", Keys.Control | Keys.W, (_, _) => CloseActiveDocument()));
+        items.Add(CreateMenuItem("关闭全部标签", Keys.Control | Keys.Shift | Keys.W, (_, _) => CloseWorkspaceTabs()));
         _closeContainerMenu = CreateMenuItem("关闭容器工程", Keys.None, (_, _) => LeaveContainerProject());
-        items.AddRange(new ToolStripItem[] { _containerIndexMenu, _projectWriteBackMenu, _closeContainerMenu });
-        items.Add(CreateMenuItem("旧流程：提取容器 FNG…", Keys.None, OpenLegacyContainerMenuItem_Click));
-        _legacyWriteBackMenu = CreateMenuItem("旧流程：写回容器副本…", Keys.None, (_, _) => WriteBackCurrentContainer());
-        items.Add(_legacyWriteBackMenu);
+        items.Add(_closeContainerMenu);
         items.Add(new ToolStripSeparator());
-        items.Add(CreateMenuItem("Close tab", Keys.Control | Keys.W, (_, _) => CloseActiveDocument()));
-        items.Add(CreateMenuItem("Close all tabs", Keys.Control | Keys.Shift | Keys.W, (_, _) => CloseWorkspaceTabs()));
-        items.Add(new ToolStripSeparator());
-        _cleanupMenu = CreateMenuItem("Cleanup and save", Keys.None, CleanupAndSaveToolStripMenuItem_Click);
-        items.Add(_cleanupMenu);
-        items.Add(new ToolStripSeparator());
-        items.Add(CreateMenuItem("Exit", Keys.None, (_, _) => Close()));
+        items.Add(CreateMenuItem("退出", Keys.None, (_, _) => Close()));
+
+        _containerIndexMenu = CreateMenuItem("查看容器块索引…", Keys.None, (_, _) => ShowContainerBlockIndex());
+        _cleanupMenu = CreateMenuItem("清理名称并另存为…", Keys.None, CleanupAndSaveToolStripMenuItem_Click);
+        _toolsMenu = new ToolStripMenuItem("工具(&T)");
+        _toolsMenu.DropDownItems.Add(CreateMenuItem("配置 Binary 运行库…", Keys.None, (_, _) => ConfigureBinaryRuntime()));
+        _toolsMenu.DropDownItems.Add(new ToolStripSeparator());
+        _toolsMenu.DropDownItems.Add(_cleanupMenu);
+        _toolsMenu.DropDownItems.Add(CreateMenuItem("旧版容器 FNG 提取…", Keys.None, OpenLegacyContainerMenuItem_Click));
+        _legacyWriteBackMenu = CreateMenuItem("写回容器副本…", Keys.None, (_, _) => WriteBackCurrentContainer());
+        _toolsMenu.DropDownItems.Add(_legacyWriteBackMenu);
     }
 
     private static ToolStripMenuItem CreateMenuItem(string text, Keys shortcut, EventHandler onClick)
@@ -513,11 +521,14 @@ public partial class PackageView
         _saveMenu.Enabled = _saveAsMenu.Enabled = _containerProject != null || active != null;
         _saveMenu.Text = _containerProject != null ? "保存工程" : "保存";
         _saveAsMenu.Text = _containerProject != null ? "工程另存为…" : "另存为…";
+        _exportFngMenu.Visible = _containerProject != null;
+        _exportFngMenu.Enabled = active?.Package != null;
         _cleanupMenu.Enabled = active != null && active.Project == null;
         _saveAllMenu.Enabled = _containerProject == null && _workspace.DirtyCount > 0;
         _restoreBackupMenu.Enabled = active != null && active.Project == null &&
                                      _standaloneBackups.TryReadBackupInfo(active.FilePath) != null;
         _containerIndexMenu.Visible = _closeContainerMenu.Visible = _projectWriteBackMenu.Visible = _containerProject != null;
+        _exportGroupSeparator.Visible = _exportFngMenu.Visible || _projectWriteBackMenu.Visible;
         _legacyWriteBackMenu.Visible = active != null && active.Project == null && _legacyFiles.Contains(active.SourcePath);
         SetFormDetails();
     }
@@ -690,12 +701,9 @@ public partial class PackageView
         return byTime != 0 ? byTime : string.Compare(left.Path, right.Path, StringComparison.OrdinalIgnoreCase);
     });
 
-    /// <summary>History order follows the file's last write time; LastUsedUtc only covers missing files.</summary>
-    private static DateTimeOffset SortTimestamp(RecentEntry entry)
-    {
-        var modified = FileTimestamp(entry.Path);
-        return modified == DateTimeOffset.MinValue ? entry.LastUsedUtc : modified;
-    }
+    /// <summary>Uses the actual open/activation timestamp; file write time only for legacy entries.</summary>
+    private static DateTimeOffset SortTimestamp(RecentEntry entry) =>
+        entry.LastUsedUtc == default ? FileTimestamp(entry.Path) : entry.LastUsedUtc;
 
     private void LoadRecentEntries()
     {
@@ -875,8 +883,8 @@ public partial class PackageView
         var groups = _containerGroup == null ? _workspace?.Groups.Count ?? 0 : 1;
         var opened = _workspace?.DocumentCount ?? 0;
         TxtSearch.PlaceholderText = _leftMode == WorkspaceLeftMode.Files
-            ? $"搜索 FNG 文件（共 {count} 个）..."
-            : "搜索节点（Enter 查找）...";
+            ? $"搜索 FNG 文件（共 {count} 个）"
+            : "搜索节点（Enter 查找）";
         if (_pageHeading != null)
             _pageHeading.Text = _leftMode == WorkspaceLeftMode.Files
                 ? $"工作区\n{groups} 个来源 · {count} 个文件 · 已打开 {opened} · 已修改 {_workspace?.DirtyCount ?? 0}"
@@ -1139,7 +1147,7 @@ public partial class PackageView
         {
             var index = file.Project.Index;
             MessageBox.Show(this,
-                $"{file.Location}\n\n源容器 SHA256\n{index.SourceSha256}\n\n块 ID 0x{file.Block.ChunkId:X8} · {file.Block.TotalLength:N0} 字节",
+                $"{file.Location}\n\n来源容器 SHA256\n{index.SourceSha256}\n\n块 ID 0x{file.Block.ChunkId:X8} · {file.Block.TotalLength:N0} 字节",
                 file.Caption, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -1181,7 +1189,7 @@ public partial class PackageView
     {
         using var dialog = new OpenFileDialog
         {
-            Filter = "FNG Files (*.fng, *.bin)|*.fng;*.bin|JSON Files (*.json)|*.json",
+            Filter = "FNG 文件 (*.fng, *.bin)|*.fng;*.bin|JSON 文件 (*.json)|*.json",
             CheckFileExists = true,
             Multiselect = true
         };
@@ -1202,13 +1210,13 @@ public partial class PackageView
         }
         catch (Exception error)
         {
-            MessageBox.Show(this, error.Message, "Open FNG folder failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, error.Message, "打开 FNG 文件夹失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
         if (paths.Length == 0)
         {
-            MessageBox.Show(this, "此文件夹中没有 FNG 文件。请选择直接包含 FNG 的文件夹。", "Open FNG folder");
+            MessageBox.Show(this, "此文件夹中没有 FNG 文件。请选择直接包含 FNG 的文件夹。", "打开 FNG 文件夹");
             return;
         }
 
@@ -1310,7 +1318,7 @@ public partial class PackageView
         {
             Filter = includeProject
                 ? "容器或工程 (*.bun, *.lzc, *.fengproj)|*.bun;*.lzc;*.fengproj"
-                : "MW05 containers (*.bun, *.lzc)|*.bun;*.lzc",
+                : "MW05 容器 (*.bun, *.lzc)|*.bun;*.lzc",
             CheckFileExists = true
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
@@ -1439,7 +1447,7 @@ public partial class PackageView
         {
             using var copyDialog = new SaveFileDialog
             {
-                Title = "选择工作副本保存位置（原始容器的完整副本，写回只修改它）",
+                Title = "选择工作副本保存位置（来源容器的完整副本，写回只修改它）",
                 Filter = "容器文件 (*.bun, *.lzc)|*.bun;*.lzc|所有文件 (*.*)|*.*",
                 FileName = Path.GetFileNameWithoutExtension(session.OriginalPath) +
                            ".work" + Path.GetExtension(session.OriginalPath),

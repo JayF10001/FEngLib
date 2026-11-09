@@ -551,6 +551,16 @@ internal sealed class TextureSourceDialog : Form
         SetDetailsText(BuildProjectOverrideDetails());
         _sourceKind.Text = "来源类型：" + SourceKindText();
         _sourceKind.ForeColor = SourceKindColor();
+        if (_resolution.PngData is not { Length: > 0 })
+        {
+            _previewStatus.Text = _resolution.InputKind == TextureInputKind.Dds
+                ? $"DDS {_resolution.Format} · {_resolution.Width} × {_resolution.Height} · " +
+                  $"{_resolution.MipCount} mip · 预览不可用"
+                : "PNG 预览不可用";
+            _previewStatus.ForeColor = Color.FromArgb(190, 100, 20);
+            SetPreview(null);
+            return;
+        }
         var previewError = SetPreview(_resolution.PngData);
         if (previewError != null)
         {
@@ -558,7 +568,10 @@ internal sealed class TextureSourceDialog : Form
             _previewStatus.ForeColor = Color.Firebrick;
             return;
         }
-        _previewStatus.Text = $"{_resolution.Width} × {_resolution.Height} · PNG · {_resolution.PngData.Length:N0} 字节";
+        _previewStatus.Text = _resolution.InputKind == TextureInputKind.Dds
+            ? $"{_resolution.Width} × {_resolution.Height} · DDS {_resolution.Format} · " +
+              $"{_resolution.MipCount} mip · 预览 PNG {_resolution.PngData.Length:N0} 字节"
+            : $"{_resolution.Width} × {_resolution.Height} · PNG · {_resolution.PngData.Length:N0} 字节";
         _previewStatus.ForeColor = SystemColors.GrayText;
     }
 
@@ -570,12 +583,20 @@ internal sealed class TextureSourceDialog : Form
             "覆盖文件：" + _resolution.Source,
             "贴图名：" + (_resolution.SourceTexture ?? _request.Name ?? "(未命名)"),
             $"尺寸：{_resolution.Width} × {_resolution.Height}",
-            "格式：PNG（覆盖层）",
-            "",
-            "FNG 资源请求：" + (_request.Name ?? "(未命名)"),
-            $"FNG 资源请求 ID：0x{_request.ID:X8}",
-            "说明：覆盖优先于松散 PNG、当前容器和共享档案；保存工程后生效。"
         };
+        if (_resolution.InputKind == TextureInputKind.Dds)
+        {
+            lines.Add("格式：DDS " + _resolution.Format + "（原始字节）");
+            lines.Add($"Mip：{_resolution.MipCount} 级");
+        }
+        else
+        {
+            lines.Add("格式：PNG（覆盖层）");
+        }
+        lines.Add("");
+        lines.Add("FNG 资源请求：" + (_request.Name ?? "(未命名)"));
+        lines.Add($"FNG 资源请求 ID：0x{_request.ID:X8}");
+        lines.Add("说明：覆盖优先于松散 PNG、当前容器和共享档案；保存工程后生效。");
         return string.Join(Environment.NewLine, lines);
     }
 
@@ -628,6 +649,7 @@ internal sealed class TextureSourceDialog : Form
         lines.Add($"贴图 BinKey：0x{info.BinKey:X8}");
         lines.Add($"尺寸：{info.Width} × {info.Height}");
         lines.Add("TPK 存储格式：" + info.Compression);
+        lines.Add("Mip 数：" + Math.Max(1, info.MipCount));
         lines.Add("条目序号：#" + info.TextureOrdinal);
         lines.Add("");
         lines.Add("FNG 资源请求：" + (_request.Name ?? "(未命名)"));

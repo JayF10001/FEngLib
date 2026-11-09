@@ -75,7 +75,7 @@ internal static class EditorStrings
 {
     private static readonly Dictionary<string,string> Words=new()
     {
-        ["File"]="文件",["Open FNG..."]="打开 FNG…",["Open container..."]="打开资源容器…",
+        ["File"]="文件",["Open FNG..."]="打开 FNG…",["Open container..."]="打开容器…",
         ["Open FNG folder..."]="加入 FNG 文件夹…",["Save"]="保存",["Save as..."]="另存为…",
         ["Save all modified FNG"]="保存全部修改",["Reload"]="重新加载",["Write back current container copy..."]="写回当前容器副本…",
         ["Close tab"]="关闭标签",["Close all tabs"]="关闭全部标签",["Cleanup and save"]="清理名称并另存为…",["Exit"]="退出",
@@ -95,7 +95,7 @@ internal static class EditorStrings
         ["UsesLibraryObject"]="使用库对象",["CodeSuppliedResource"]="由代码提供资源",["ObjectLocked"]="锁定对象",["HideInEdit"]="编辑器中隐藏",
         ["Resources"]="资源请求",["MessageResponse"]="消息响应",["MessageDefinitions"]="消息定义",["MessageTargets"]="消息目标",
         ["Browse..."]="浏览…",["Cancel"]="取消",["Extract Selected"]="提取选中项",["Extract All & Open Tabs"]="提取全部并打开标签",
-        ["Container:"]="资源容器：",["Output folder:"]="输出文件夹：",["Filter:"]="筛选：",["Status"]="状态",
+        ["Container:"]="来源容器：",["Output folder:"]="输出文件夹：",["Filter:"]="筛选：",["Status"]="状态",
         ["Rename..."]="重命名…",["Background color..."]="画布背景色…",["Order group and children"]="递归排序组",
         ["Next"]="下一个",["Previous"]="上一个",["Start/Stop"]="播放/停止"
     };

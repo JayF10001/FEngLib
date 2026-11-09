@@ -225,8 +225,13 @@ internal sealed class ContainerExportPreviewDialog : Form
         cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         cards.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         var fngCount = plan.FngPlan?.Items.Count ?? 0;
+        var textureCaption = plan.DdsTextureCount == 0
+            ? "贴图替换"
+            : plan.PngTextureCount == 0
+                ? $"贴图替换（DDS {plan.DdsTextureCount}）"
+                : $"贴图替换（DDS {plan.DdsTextureCount} / PNG {plan.PngTextureCount}）";
         cards.Controls.Add(BuildCountCard(fngCount, "FNG 修改", new Padding(0, 0, 8, 0)), 0, 0);
-        cards.Controls.Add(BuildCountCard(plan.Textures.Count, "贴图替换", new Padding(8, 0, 0, 0)), 1, 0);
+        cards.Controls.Add(BuildCountCard(plan.Textures.Count, textureCaption, new Padding(8, 0, 0, 0)), 1, 0);
         overviewSection.Controls.Add(cards, 0, 1);
         root.Controls.Add(overviewSection, 0, 2);
 
@@ -432,8 +437,10 @@ internal sealed class ContainerExportPreviewDialog : Form
                 ? texture.RequestId.ToString("X8")
                 : texture.RequestName;
             var row = new ListViewItem(name);
-            row.SubItems.Add("贴图替换");
-            row.SubItems.Add($"{texture.Width} × {texture.Height} · {texture.PngData.Length:N0} 字节");
+            row.SubItems.Add(texture.IsDds ? "DDS 贴图" : "PNG 贴图");
+            row.SubItems.Add(texture.IsDds
+                ? $"DDS {texture.Format} · {texture.Width} × {texture.Height} · {texture.MipCount} mip · {texture.StoredLength:N0} 字节"
+                : $"{texture.Width} × {texture.Height} · {texture.StoredLength:N0} 字节");
             row.ToolTipText = $"{texture.TargetTpkName} / {texture.TargetTextureName} · {texture.TargetCompression}";
             detailList.Items.Add(row);
         }
@@ -610,9 +617,16 @@ internal sealed class ContainerExportPreviewDialog : Form
                     var name = string.IsNullOrWhiteSpace(texture.RequestName)
                         ? texture.RequestId.ToString("X8")
                         : texture.RequestName;
+                    AddTechnicalRow(table, name + " 覆盖类型",
+                        texture.IsDds ? "DDS（原始字节，不重新编码）" : "PNG");
+                    AddTechnicalRow(table, name + " 格式",
+                        texture.IsDds ? "DDS " + texture.Format : "PNG");
+                    AddTechnicalRow(table, name + " 尺寸",
+                        $"{texture.Width} × {texture.Height}" +
+                        (texture.IsDds ? $" · {texture.MipCount} mip" : ""));
                     AddTechnicalRow(table, name + " 目标",
                         $"{texture.TargetTpkName} / {texture.TargetTextureName} · {texture.TargetCompression}");
-                    AddTechnicalRow(table, name + " PNG SHA256", texture.Sha256, copy: true, mono: true);
+                    AddTechnicalRow(table, name + " 载荷 SHA256", texture.Sha256, copy: true, mono: true);
                 }
             });
         }

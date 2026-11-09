@@ -5,7 +5,7 @@ using FEngLib.Assets;
 
 namespace FEngViewer;
 
-/// <summary>Read-only resolver source for PNG overrides stored in the current .fengproj.</summary>
+/// <summary>Read-only resolver source for PNG/DDS overrides stored in the current .fengproj.</summary>
 internal sealed class ProjectTextureOverrideSource : ITextureSource
 {
     private readonly IReadOnlyDictionary<uint, ContainerTextureOverride> _overrides;
@@ -31,18 +31,34 @@ internal sealed class ProjectTextureOverrideSource : ITextureSource
         var stored = TextureResolver.NormalizeRequestName(texture.RequestName);
         if (stored.Length > 0 && name.Length > 0 &&
             !string.Equals(name, stored, StringComparison.OrdinalIgnoreCase)) return null;
+        byte[] preview = null;
+        string previewError = null;
+        try
+        {
+            preview = texture.GetPreviewPng();
+        }
+        catch (Exception error)
+        {
+            // Keep the override authoritative for metadata and validation even if the optional
+            // DevIL/Binary preview decoder is not available in this session.
+            previewError = "DDS 预览解码失败：" + error.Message;
+        }
         return new TextureLookupResult
         {
             Status = TextureLookupStatus.Found,
             RequestedName = name,
             RequestedId = resourceId,
-            PngData = texture.PngData,
+            PngData = preview,
             Source = "工程覆盖 · " + texture.SourceName,
             SourceTexture = texture.RequestName,
+            Message = previewError,
             IsProjectOverride = true,
             Width = texture.Width,
             Height = texture.Height,
-            Compression = "PNG",
+            Compression = texture.IsDds ? "DDS " + texture.Format : "PNG",
+            InputKind = texture.InputKind,
+            Format = texture.Format,
+            MipCount = texture.MipCount,
         };
     }
 }

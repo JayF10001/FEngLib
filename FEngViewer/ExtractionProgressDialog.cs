@@ -37,12 +37,12 @@ internal sealed class ExtractionProgressDialog : Form
         HideSelection = true,
         HeaderStyle = ColumnHeaderStyle.Nonclickable
     };
-    private readonly Label _headline = new() { AutoSize = true, Text = "Preparing..." };
+    private readonly Label _headline = new() { AutoSize = true, Text = "正在准备提取" };
     private readonly ProgressBar _progress = new() { Dock = DockStyle.Fill, Style = ProgressBarStyle.Continuous };
-    private readonly Label _totals = new() { AutoSize = true, Text = "总计: 0" };
+    private readonly Label _totals = new() { AutoSize = true, Text = "总计 0 个 · 已提取 0 个 · 失败 0 个" };
     private readonly Label _opened = new() { AutoSize = true, MaximumSize = new Size(700, 0) };
     private readonly Label _error = new() { AutoSize = true, MaximumSize = new Size(700, 0), ForeColor = FailedColor };
-    private readonly Button _close = new() { Text = "Close", AutoSize = true, Enabled = false };
+    private readonly Button _close = new() { Text = "关闭", AutoSize = true, Enabled = false };
     private readonly Dictionary<long, ListViewItem> _rows = new();
 
     private bool _busy;
@@ -60,7 +60,7 @@ internal sealed class ExtractionProgressDialog : Form
         _listAllEntries = listAllEntries;
         _importFiles = importFiles;
 
-        Text = "Extracting and Opening...";
+        Text = "正在提取并打开";
         StartPosition = FormStartPosition.CenterParent;
         Size = new Size(760, 560);
         MinimumSize = new Size(620, 420);
@@ -116,7 +116,7 @@ internal sealed class ExtractionProgressDialog : Form
         {
             var row = new ListViewItem(new[]
             {
-                "-", entry.Name ?? "(名称不可用)", FormatSize(entry.StoredLength), DescribeEntry(entry)
+                entry.CanExtract ? "-" : "失败", entry.Name ?? "(名称不可用)", FormatSize(entry.StoredLength), DescribeEntry(entry)
             })
             {
                 Tag = entry,
@@ -130,21 +130,24 @@ internal sealed class ExtractionProgressDialog : Form
 
     private static string DescribeEntry(FngContainerEntry entry) => entry.Storage switch
     {
-        FngStorageKind.Compressed => entry.Diagnostic ?? "压缩块：暂不支持解压",
+        FngStorageKind.Compressed => entry.Diagnostic ?? "压缩块暂不支持",
         FngStorageKind.Invalid => entry.Diagnostic ?? "块头损坏，无法提取",
-        _ => "可以提取"
+        _ => "可提取"
     };
 
-    private static string FormatSize(long bytes) => bytes >= 1024 * 1024
-        ? $"{bytes / 1048576.0:0.0} MB"
-        : $"{Math.Max(1, bytes / 1024.0):0} KB";
+    private static string FormatSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes:N0} 字节";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
+        return $"{bytes / 1048576.0:0.#} MB";
+    }
 
     private async Task RunAsync()
     {
         _busy = true;
         _progress.Maximum = Math.Max(1, _selection.Length);
         _progress.Value = 0;
-        _headline.Text = $"Processing {_selection.Length} entries...";
+        _headline.Text = $"正在提取 {_selection.Length} 个 FNG";
         PopulateRows();
         Application.DoEvents();
 
@@ -179,8 +182,8 @@ internal sealed class ExtractionProgressDialog : Form
                 }
 
             _error.Text = "提取失败，未写入任何文件：" + error.Message;
-            _headline.Text = "Failed";
-            _totals.Text = "总计: " + _list.Items.Count + "　提取: 0";
+            _headline.Text = "提取失败";
+            _totals.Text = $"总计 {_list.Items.Count} 个 · 已提取 0 个 · 失败 {_list.Items.Count} 个";
         }
         finally
         {
@@ -193,7 +196,7 @@ internal sealed class ExtractionProgressDialog : Form
     private void OnBlockExtracted(FngExtractionProgress report)
     {
         _progress.Value = Math.Min(_progress.Maximum, report.Index);
-        _headline.Text = $"Processing {_selection.Length} entries... {report.Index}/{_selection.Length}";
+        _headline.Text = $"正在提取 · {report.Index}/{_selection.Length}";
         if (!_rows.TryGetValue(report.Entry.Offset, out var row)) return;
         row.SubItems[0].Text = "提取";
         row.SubItems[3].Text = "已写入 " + Path.GetFileName(report.OutputPath);
@@ -206,7 +209,7 @@ internal sealed class ExtractionProgressDialog : Form
         {
             if (!_rows.TryGetValue(skip.Entry.Offset, out var row)) continue;
             var exists = File.Exists(skip.OutputPath);
-            row.SubItems[0].Text = exists ? "跳过" : "跳过";
+            row.SubItems[0].Text = "跳过";
             row.SubItems[3].Text = exists ? "已存在，保留原文件" : "只有来源记录，缺少 FNG";
             row.ForeColor = exists ? SkippedColor : FailedColor;
         }
@@ -223,11 +226,11 @@ internal sealed class ExtractionProgressDialog : Form
         var failed = _listAllEntries
             ? _container.Entries.Count(entry => entry.Storage != FngStorageKind.Uncompressed)
             : 0;
-        var totals = $"总计: {listed}　提取: {batch.Extracted.Count}　跳过: {batch.Skipped.Count}";
-        if (failed > 0) totals += $"　损坏/不支持: {failed}";
-        if (batch.OverwrittenCount > 0) totals += $"　覆盖: {batch.OverwrittenCount}";
+        var totals = $"总计 {listed} 个 · 已提取 {batch.Extracted.Count} 个 · 失败 {failed} 个";
+        if (batch.Skipped.Count > 0) totals += $" · 跳过 {batch.Skipped.Count} 个";
+        if (batch.OverwrittenCount > 0) totals += $" · 覆盖 {batch.OverwrittenCount} 个";
         _totals.Text = totals;
-        _headline.Text = "Processing " + _selection.Length + " entries... 100%";
+        _headline.Text = "提取完成（100%）";
         _progress.Value = _progress.Maximum;
     }
 

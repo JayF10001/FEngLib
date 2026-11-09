@@ -155,6 +155,7 @@ public partial class PackageView
         view.DropDownItems.Add(CreateMenuItem("100%",Keys.Control|Keys.D1,(_,_)=>viewOutput.SetZoom(1)));
         view.DropDownItems.Add(new ToolStripSeparator());
         view.DropDownItems.Add(CreateMenuItem("贴图来源…",Keys.None,(_,_)=>ConfigureTextureSources()));
+        view.DropDownItems.Add(_containerIndexMenu);
         var help=new ToolStripMenuItem("帮助(&H)");
         help.DropDownItems.Add("操作说明",null,(_,_)=>MessageBox.Show(this,
             "滚轮：鼠标中心缩放；中键：平移；Alt+点击：轮换重叠对象\n"+
@@ -166,7 +167,7 @@ public partial class PackageView
             "高级页可编辑原始字段。文件保存与容器写回不属于撤销范围。","操作说明"));
         help.DropDownItems.Add(new ToolStripSeparator());
         help.DropDownItems.Add("关于 FEngEditor…",null,(_,_)=>ShowAbout());
-        menuStrip1.Items.AddRange(new ToolStripItem[]{edit,objects,view,help});
+        menuStrip1.Items.AddRange(new ToolStripItem[]{edit,objects,view,_toolsMenu,help});
         BuildCanvasTools();
         var createContext=new ToolStripMenuItem("新建对象…",null,(_,_)=>CreateObject());
         objectContextMenu.Items.Insert(0,createContext);

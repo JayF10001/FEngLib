@@ -128,7 +128,7 @@ internal sealed class ProjectBaselineRecoveryDialog : Form
         for (var row = 0; row < 4; row++) cardRows.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         cardRows.Controls.Add(new Label
         {
-            Text = string.IsNullOrWhiteSpace(info.SourcePath) ? "基线容器" : $"工程基线容器：{sourceName}",
+            Text = string.IsNullOrWhiteSpace(info.SourcePath) ? "基线容器" : $"基线容器：{sourceName}",
             AutoSize = true,
             Font = new Font(Font.FontFamily, 10.5f, FontStyle.Bold),
             Margin = new Padding(0, 0, 0, 8)
@@ -378,7 +378,10 @@ internal sealed class ProjectBaselineRecoveryDialog : Form
             text.AppendLine($"  FNG 修改      {edit.PackageName}（0x{edit.Offset:X}）");
         if (info.Edits.Count > 8) text.AppendLine($"  ……另有 {info.Edits.Count - 8} 个 FNG 修改");
         foreach (var texture in info.Textures.Take(8))
-            text.AppendLine($"  贴图覆盖      {texture.RequestName}（0x{texture.FngOffset:X}）");
+            text.AppendLine($"  贴图覆盖      {texture.RequestName}（0x{texture.FngOffset:X}）· " +
+                            (texture.InputKind == FEngLib.Assets.TextureInputKind.Dds
+                                ? $"DDS {texture.Format} · {texture.Width} × {texture.Height} · {texture.MipCount} mip"
+                                : $"PNG · {texture.Width} × {texture.Height}"));
         if (info.Textures.Count > 8) text.AppendLine($"  ……另有 {info.Textures.Count - 8} 个贴图覆盖");
         text.AppendLine();
         text.AppendLine("检查结果");
@@ -467,7 +470,7 @@ internal sealed class ProjectBaselineRecoveryDialog : Form
         if (busy) return;
         using var dialog = new OpenFileDialog
         {
-            Title = "选择工程基线容器",
+            Title = "选择基线容器",
             Filter = "容器文件 (*.lzc;*.bun;*.bin)|*.lzc;*.bun;*.bin|所有文件 (*.*)|*.*",
             CheckFileExists = true,
             Multiselect = false

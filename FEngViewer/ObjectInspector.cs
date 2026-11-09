@@ -170,9 +170,9 @@ internal sealed class ObjectInspector:UserControl
                 if(current is MultiImage mi)
                 {
                     Header("多图层（资源 ID）");
-                    Number("纹理 1",mi.Texture1,v=>mi.Texture1=(uint)v,0,uint.MaxValue,0);
-                    Number("纹理 2",mi.Texture2,v=>mi.Texture2=(uint)v,0,uint.MaxValue,0);
-                    Number("纹理 3",mi.Texture3,v=>mi.Texture3=(uint)v,0,uint.MaxValue,0);
+                    Number("贴图 1",mi.Texture1,v=>mi.Texture1=(uint)v,0,uint.MaxValue,0);
+                    Number("贴图 2",mi.Texture2,v=>mi.Texture2=(uint)v,0,uint.MaxValue,0);
+                    Number("贴图 3",mi.Texture3,v=>mi.Texture3=(uint)v,0,uint.MaxValue,0);
                     Uv("图层 1 左上",mi.Data.TopLeft1,v=>mi.Data.TopLeft1=v);Uv("图层 1 右下",mi.Data.BottomRight1,v=>mi.Data.BottomRight1=v);
                     Uv("图层 2 左上",mi.Data.TopLeft2,v=>mi.Data.TopLeft2=v);Uv("图层 2 右下",mi.Data.BottomRight2,v=>mi.Data.BottomRight2=v);
                     Uv("图层 3 左上",mi.Data.TopLeft3,v=>mi.Data.TopLeft3=v);Uv("图层 3 右下",mi.Data.BottomRight3,v=>mi.Data.BottomRight3=v);
@@ -192,7 +192,7 @@ internal sealed class ObjectInspector:UserControl
             }
             Row("",buttons);
         }
-        EditorTheme.Apply(this);table.ResumeLayout();building=false;
+        EditorTheme.Apply(this);ApplyTaggedLabelColors(table);table.ResumeLayout();building=false;
     }
     private static int Clamp(int n)=>Math.Clamp(n,0,255);
     private void CornerColor(string label,Func<Color4> get,Action<Color4> set)
@@ -211,6 +211,12 @@ internal sealed class ObjectInspector:UserControl
         var row=table.RowCount++;table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         table.Controls.Add(new Label{Text=label,AutoSize=true,Margin=new Padding(0,6,6,5)},0,row);
         value.Dock=DockStyle.Fill;value.Margin=new Padding(0,3,0,4);table.Controls.Add(value,1,row);
+    }
+    private void FullRow(Control value)
+    {
+        var row=table.RowCount++;table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        value.Dock=DockStyle.Fill;value.Margin=new Padding(0,4,0,4);
+        table.Controls.Add(value,0,row);table.SetColumnSpan(value,2);
     }
     private void Apply(string label,Action change) {if(!building) EditRequested?.Invoke(label,change);}
     private NumericUpDown MakeNumber(string label,double initial,Action<decimal> set,decimal min=-10000000,decimal max=10000000,int digits=3)
@@ -262,48 +268,7 @@ internal sealed class ObjectInspector:UserControl
         foreach(var r in resources)combo.Items.Add($"{r.Name??"未命名"} · 0x{r.ID:X8}");
         combo.SelectedIndex=resources.IndexOf(current.ResourceRequest)+1;
         combo.SelectedIndexChanged+=(_,_)=>{var r=combo.SelectedIndex>0?resources[combo.SelectedIndex-1]:null;Apply("更换资源",()=>current.ResourceRequest=r);};Row(kind==ResourceType.Font?"字体资源":"贴图资源",combo);
-        if(kind==ResourceType.Image) AddSharedTextureRow();
-        if(kind==ResourceType.Image && CanViewTextureSource) AddTextureSourceRow();
-        if(kind==ResourceType.Image && CanViewTextureSource) AddTextureReplaceRow();
-        if(kind!=ResourceType.Image)return;
-        TableLayoutPanel statusPanel=null;
-        var picture=new PictureBox{Height=100,SizeMode=PictureBoxSizeMode.Zoom,
-            BackColor=Color.FromArgb(210,210,210),BackgroundImage=PreviewBackground.Checkerboard,
-            BackgroundImageLayout=ImageLayout.Tile,BorderStyle=BorderStyle.FixedSingle};
-        try
-        {
-            var resolution=TextureResolver?.Resolve(current.ResourceRequest);
-            if(resolution!=null)
-            {
-                statusPanel=BuildTextureStatusPanel(resolution);
-                if(resolution.IsFound)
-                {
-                    using var stream=new MemoryStream(resolution.PngData);
-                    using var image=System.Drawing.Image.FromStream(stream);
-                    picture.Image=new Bitmap(image);
-                }
-            }
-            else
-            {
-                var name=Path.GetFileNameWithoutExtension((current.ResourceRequest?.Name??"").Replace('\\','/'));
-                var path=Directory.Exists(textureDirectory)?Directory.EnumerateFiles(textureDirectory,"*.png").FirstOrDefault(f=>
-                    string.Equals(Path.GetFileNameWithoutExtension(f),name,StringComparison.OrdinalIgnoreCase) ||
-                    f.Contains($"(0x{current.ResourceRequest?.ID:X8})",StringComparison.OrdinalIgnoreCase)):null;
-                if(path!=null)
-                {
-                    using var img=System.Drawing.Image.FromFile(path);
-                    picture.Image=new Bitmap(img);
-                    statusPanel=BuildSimpleTextureStatus("已找到","松散 PNG",path,Color.ForestGreen);
-                }
-                else statusPanel=BuildSimpleTextureStatus("缺失","未找到贴图",null,Color.Firebrick);
-            }
-        }
-        catch(IOException error){statusPanel=BuildSimpleTextureStatus("贴图读取失败",error.Message,null,Color.Firebrick);}
-        catch(ArgumentException error){statusPanel=BuildSimpleTextureStatus("贴图读取失败",error.Message,null,Color.Firebrick);}
-        catch(Exception error){statusPanel=BuildSimpleTextureStatus("贴图错误",error.Message,null,Color.Firebrick);}
-        picture.Disposed+=(_,_)=>picture.Image?.Dispose();
-        statusPanel??=BuildSimpleTextureStatus("贴图状态不可用","",null,Color.Firebrick);
-        Row("贴图状态",statusPanel);Row("PNG 预览",picture);
+        if(kind==ResourceType.Image) AddTextureSection();
     }
 
     private TableLayoutPanel BuildTextureStatusPanel(TextureLookupResult resolution)
@@ -319,6 +284,7 @@ internal sealed class ObjectInspector:UserControl
             AddStatusRow(panel,"BinKey",$"0x{entry.BinKey:X8}");
             AddStatusRow(panel,"尺寸",$"{entry.Width} × {entry.Height}");
             AddStatusRow(panel,"格式",entry.Compression);
+            AddStatusRow(panel,"Mip",$"{Math.Max(1,entry.MipCount)} 级");
         }
         else if(resolution.IsProjectOverride)
         {
@@ -326,7 +292,10 @@ internal sealed class ObjectInspector:UserControl
             AddStatusRow(panel,"覆盖",resolution.Source);
             AddStatusRow(panel,"贴图",resolution.SourceTexture ?? resolution.RequestedName);
             AddStatusRow(panel,"尺寸",$"{resolution.Width} × {resolution.Height}");
-            AddStatusRow(panel,"格式",resolution.Compression ?? "PNG");
+            AddStatusRow(panel,"格式",resolution.InputKind==TextureInputKind.Dds
+                ? "DDS " + resolution.Format : resolution.Compression ?? "PNG");
+            if(resolution.InputKind==TextureInputKind.Dds)
+                AddStatusRow(panel,"Mip",$"{resolution.MipCount} 级");
         }
         else if(resolution.IsFound)
         {
@@ -346,6 +315,15 @@ internal sealed class ObjectInspector:UserControl
         if(!string.IsNullOrWhiteSpace(resolution.Message) &&
             resolution.Status is TextureLookupStatus.NotFound or TextureLookupStatus.Ambiguous or TextureLookupStatus.Error)
             AddStatusRow(panel,"说明",resolution.Message);
+        var request=current?.ResourceRequest;
+        if(request!=null && package!=null)
+        {
+            var others=package.Objects.Count(o=>!ReferenceEquals(o,current) &&
+                o.ResourceRequest!=null && o.ResourceRequest.ID==request.ID);
+            AddStatusRow(panel,"共用",others==0
+                ? "仅此对象使用该贴图"
+                : $"与 {others} 个对象共用",others==0?Color.DimGray:Color.SteelBlue);
+        }
         return panel;
     }
 
@@ -371,8 +349,10 @@ internal sealed class ObjectInspector:UserControl
         var row=panel.RowCount++;
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.Controls.Add(new Label{Text=key,AutoSize=true,Font=sectionFont,Margin=new Padding(0,2,8,2)},0,row);
-        panel.Controls.Add(new Label{Text=value??"",AutoSize=true,MaximumSize=new Size(StatusValueWidth(),0),
-            ForeColor=color??ForeColor,Margin=new Padding(0,2,0,2)},1,row);
+        var valueLabel=new Label{Text=value??"",AutoSize=true,MaximumSize=new Size(StatusValueWidth(),0),
+            ForeColor=color??ForeColor,Margin=new Padding(0,2,0,2)};
+        if(color.HasValue)valueLabel.Tag=color.Value;
+        panel.Controls.Add(valueLabel,1,row);
     }
 
     private int StatusValueWidth()
@@ -401,46 +381,223 @@ internal sealed class ObjectInspector:UserControl
         _=>Color.DimGray
     };
 
-    private void AddSharedTextureRow()
+    private void AddTextureSection()
     {
         var request=current?.ResourceRequest;
-        if(request==null)return;
-        var others=package.Objects.Count(o=>!ReferenceEquals(o,current) &&
-            o.ResourceRequest!=null && o.ResourceRequest.ID==request.ID);
-        var name=string.IsNullOrWhiteSpace(request.Name)?$"0x{request.ID:X8}":request.Name;
-        var text=others==0
-            ? $"仅此对象使用贴图：{name}"
-            : $"与 {others} 个对象共用贴图：{name}";
-        Row("共用贴图",new Label{Text=text,AutoSize=true,MaximumSize=new Size(260,0),
-            ForeColor=others==0?Color.DimGray:Color.SteelBlue});
+        TextureLookupResult resolution=null;
+        string fallbackPath=null,simpleStatus=null,simpleDetail=null;
+        try
+        {
+            resolution=TextureResolver?.Resolve(request);
+            if(resolution==null)
+            {
+                fallbackPath=FindLooseTexturePath(request);
+                if(fallbackPath!=null){simpleStatus="松散 PNG";simpleDetail=fallbackPath;}
+                else {simpleStatus="未找到";simpleDetail="未找到贴图";}
+            }
+        }
+        catch(IOException error){simpleStatus="贴图读取失败";simpleDetail=error.Message;}
+        catch(ArgumentException error){simpleStatus="贴图读取失败";simpleDetail=error.Message;}
+        catch(Exception error){simpleStatus="贴图错误";simpleDetail=error.Message;}
+
+        AddTextureSourceRow(request,resolution,fallbackPath,simpleStatus);
+        AddTexturePreviewRow(request,resolution,fallbackPath,simpleStatus);
+        AddTextureDetailsRow(request,resolution,fallbackPath,simpleStatus,simpleDetail);
     }
 
-    private void AddTextureSourceRow()
+    private string FindLooseTexturePath(ResourceRequest request)
     {
-        var request=current?.ResourceRequest;
-        var button=new Button
-        {
-            Text=request==null?"查看贴图来源…（未设置资源）":"查看贴图来源…",
-            AutoSize=true,
-            Enabled=request!=null,
-            Tag=request
-        };
-        button.Click+=(_,_)=>{if(button.Tag is ResourceRequest r)TextureSourceRequested?.Invoke(current,r);};
-        Row("贴图来源",button);
+        if(request==null || !Directory.Exists(textureDirectory))return null;
+        var name=Path.GetFileNameWithoutExtension((request.Name??"").Replace('\\','/'));
+        return Directory.EnumerateFiles(textureDirectory,"*.png").FirstOrDefault(f=>
+            string.Equals(Path.GetFileNameWithoutExtension(f),name,StringComparison.OrdinalIgnoreCase) ||
+            f.Contains($"(0x{request.ID:X8})",StringComparison.OrdinalIgnoreCase));
     }
 
-    private void AddTextureReplaceRow()
+    private void AddTextureSourceRow(ResourceRequest request,TextureLookupResult resolution,
+        string fallbackPath,string simpleStatus)
     {
-        var request=current?.ResourceRequest;
-        var button=new Button
+        var value=new FlowLayoutPanel{AutoSize=true,Dock=DockStyle.Fill,WrapContents=false,Margin=Padding.Empty};
+        value.Controls.Add(new Label{Text=TextureSourceLabel(resolution,fallbackPath,simpleStatus),
+            AutoSize=true,Margin=new Padding(0,3,8,0)});
+        if(CanViewTextureSource)
         {
-            Text=request==null?"替换贴图…（未设置资源）":"替换贴图…",
-            AutoSize=true,
-            Enabled=request!=null,
-            Tag=request
+            var button=new Button{Text="查看来源…",AutoSize=true,Enabled=request!=null,Tag=request,
+                Margin=new Padding(0,0,0,0)};
+            button.Click+=(_,_)=>{if(button.Tag is ResourceRequest r)TextureSourceRequested?.Invoke(current,r);};
+            value.Controls.Add(button);
+        }
+        Row("来源",value);
+    }
+
+    private void AddTexturePreviewRow(ResourceRequest request,TextureLookupResult resolution,
+        string fallbackPath,string simpleStatus)
+    {
+        var card=new TableLayoutPanel{Dock=DockStyle.Fill,AutoSize=true,ColumnCount=2,RowCount=2,Margin=Padding.Empty};
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,LogicalToDeviceUnits(170)));
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
+
+        var header=new FlowLayoutPanel{AutoSize=true,Dock=DockStyle.Fill,WrapContents=false,Margin=new Padding(0,0,0,4)};
+        header.Controls.Add(new Label{Text="当前贴图",AutoSize=true,Font=sectionFont,Margin=new Padding(0,2,8,0)});
+        var (badge,badgeColor)=TextureBadge(resolution,fallbackPath);
+        header.Controls.Add(new Label{Text=badge,AutoSize=true,ForeColor=badgeColor,Tag=badgeColor,
+            Margin=new Padding(0,2,0,0)});
+        card.Controls.Add(header,0,0);card.SetColumnSpan(header,2);
+
+        var picture=new PictureBox{Dock=DockStyle.Fill,Height=LogicalToDeviceUnits(112),
+            SizeMode=PictureBoxSizeMode.Zoom,BackColor=Color.FromArgb(210,210,210),
+            BackgroundImage=PreviewBackground.Checkerboard,BackgroundImageLayout=ImageLayout.Tile,
+            BorderStyle=BorderStyle.FixedSingle,Margin=new Padding(0,0,8,0)};
+        var image=LoadTextureImage(resolution,fallbackPath);
+        if(image!=null) picture.Image=image;
+        picture.Disposed+=(_,_)=>picture.Image?.Dispose();
+
+        var side=new FlowLayoutPanel{Dock=DockStyle.Fill,AutoSize=true,FlowDirection=FlowDirection.TopDown,
+            WrapContents=false,Margin=Padding.Empty};
+        if(CanViewTextureSource)
+        {
+            var replace=new Button{Text="替换贴图…",AutoSize=true,Enabled=request!=null,Tag=request,
+                Margin=new Padding(0,0,0,6)};
+            replace.Click+=(_,_)=>{if(replace.Tag is ResourceRequest r)TextureReplaceRequested?.Invoke(current,r);};
+            side.Controls.Add(replace);
+        }
+        var size=TextureSize(resolution,fallbackPath);
+        if(size!=null)
+            side.Controls.Add(new Label{Text=$"{size.Value.Width} × {size.Value.Height}",AutoSize=true,
+                ForeColor=EditorTheme.Muted,Tag=EditorTheme.Muted,Margin=new Padding(0,0,0,4)});
+        var textureName=resolution?.Entry?.Name ?? resolution?.SourceTexture ?? request?.Name;
+        if(!string.IsNullOrWhiteSpace(textureName))
+            side.Controls.Add(new Label{Text=textureName,AutoSize=true,MaximumSize=new Size(240,0),
+                ForeColor=EditorTheme.Muted,Tag=EditorTheme.Muted,Margin=new Padding(0,0,0,2)});
+        var compression=resolution?.Entry?.Compression ??
+                        (resolution?.IsProjectOverride==true
+                            ? resolution.InputKind==TextureInputKind.Dds
+                                ? $"DDS {resolution.Format} · {resolution.MipCount} mip"
+                                : "PNG（工程覆盖）"
+                            : resolution?.IsFound==true || fallbackPath!=null ? "PNG" : null);
+        if(!string.IsNullOrWhiteSpace(compression))
+            side.Controls.Add(new Label{Text=compression,AutoSize=true,MaximumSize=new Size(240,0),
+                ForeColor=EditorTheme.Muted,Tag=EditorTheme.Muted,Margin=new Padding(0,0,0,4)});
+        if(!string.IsNullOrWhiteSpace(simpleStatus) && resolution?.IsFound != true)
+            side.Controls.Add(new Label{Text=simpleStatus,AutoSize=true,MaximumSize=new Size(240,0),
+                ForeColor=Color.Firebrick,Tag=Color.Firebrick,Margin=new Padding(0,0,0,2)});
+        card.Controls.Add(picture,0,1);card.Controls.Add(side,1,1);
+        FullRow(card);
+    }
+
+    private void AddTextureDetailsRow(ResourceRequest request,TextureLookupResult resolution,
+        string fallbackPath,string simpleStatus,string simpleDetail)
+    {
+        var link=new LinkLabel{Text="▸ 贴图详细信息",AutoSize=true,LinkBehavior=LinkBehavior.NeverUnderline,
+            LinkColor=EditorTheme.Accent,ActiveLinkColor=EditorTheme.Accent,Margin=new Padding(0,4,0,2)};
+        var panel=new Panel{Dock=DockStyle.Fill,AutoSize=true,Visible=false,Margin=new Padding(0,0,0,4)};
+        var details=new TableLayoutPanel{Dock=DockStyle.Top,AutoSize=true,ColumnCount=1,Margin=Padding.Empty};
+        details.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
+
+        var title=new Label{Text="技术信息",AutoSize=true,Font=sectionFont,Margin=new Padding(0,2,0,6)};
+        details.Controls.Add(title,0,0);
+        var summary=$"FNG：{package?.Name ?? "(未知)"}\r\n" +
+                    $"请求：{request?.Name ?? "(未设置)"} · 0x{(request?.ID ?? 0):X8}";
+        details.Controls.Add(new Label{Text=summary,AutoSize=true,MaximumSize=new Size(Math.Max(240,common.ClientSize.Width-40),0),
+            Margin=new Padding(0,0,0,6)},0,1);
+        Control status;
+        if(resolution!=null)
+            status=BuildTextureStatusPanel(resolution);
+        else
+            status=BuildSimpleTextureStatus(simpleStatus??"未找到",simpleDetail,fallbackPath,
+                simpleStatus is "松散 PNG" ? Color.ForestGreen : Color.Firebrick);
+        status.Dock=DockStyle.Top;
+        details.Controls.Add(status,0,2);
+        panel.Controls.Add(details);
+        link.LinkClicked+=(_,_)=>
+        {
+            panel.Visible=!panel.Visible;
+            link.Text=panel.Visible?"▾ 贴图详细信息":"▸ 贴图详细信息";
+            table.PerformLayout();
         };
-        button.Click+=(_,_)=>{if(button.Tag is ResourceRequest r)TextureReplaceRequested?.Invoke(current,r);};
-        Row("替换贴图",button);
+        FullRow(link);
+        FullRow(panel);
+    }
+
+    private static string TextureSourceLabel(TextureLookupResult resolution,string fallbackPath,string simpleStatus)
+    {
+        if(resolution?.Entry!=null)return "TPK 档案";
+        if(resolution?.IsProjectOverride==true)return "工程贴图覆盖";
+        if(resolution?.IsFound==true || fallbackPath!=null)return "松散 PNG";
+        if(!string.IsNullOrWhiteSpace(simpleStatus))return simpleStatus;
+        return resolution?.Status switch
+        {
+            TextureLookupStatus.NotFound=>"未找到",
+            TextureLookupStatus.Ambiguous=>"存在多个同名候选",
+            TextureLookupStatus.Error=>"来源或解码错误",
+            TextureLookupStatus.NoRequest=>"未设置贴图资源",
+            _=>"未知来源"
+        };
+    }
+
+    private static (string Text,Color Color) TextureBadge(TextureLookupResult resolution,string fallbackPath)
+    {
+        if(resolution?.IsProjectOverride==true)return ("已替换",Color.SteelBlue);
+        if(resolution?.Entry!=null)return ("原始贴图",Color.ForestGreen);
+        if(resolution?.IsFound==true || fallbackPath!=null)return ("松散 PNG",Color.FromArgb(190,100,20));
+        return ("缺失",Color.Firebrick);
+    }
+
+    private static (int Width,int Height)? TextureSize(TextureLookupResult resolution,string fallbackPath)
+    {
+        if(resolution?.Entry is { } entry)return (entry.Width,entry.Height);
+        if(resolution!=null && resolution.Width>0 && resolution.Height>0)return (resolution.Width,resolution.Height);
+        if(resolution?.PngData is {Length:>0} bytes)return TryGetImageSize(bytes);
+        if(!string.IsNullOrWhiteSpace(fallbackPath))
+        {
+            try
+            {
+                using var image=System.Drawing.Image.FromFile(fallbackPath);
+                return (image.Width,image.Height);
+            }
+            catch(Exception){}
+        }
+        return null;
+    }
+
+    private static (int Width,int Height)? TryGetImageSize(byte[] bytes)
+    {
+        try
+        {
+            using var stream=new MemoryStream(bytes,writable:false);
+            using var image=System.Drawing.Image.FromStream(stream);
+            return (image.Width,image.Height);
+        }
+        catch(Exception){return null;}
+    }
+
+    private static System.Drawing.Image LoadTextureImage(TextureLookupResult resolution,string fallbackPath)
+    {
+        try
+        {
+            if(resolution?.PngData is {Length:>0} bytes)
+            {
+                using var stream=new MemoryStream(bytes,writable:false);
+                using var image=System.Drawing.Image.FromStream(stream);
+                return new Bitmap(image);
+            }
+            if(!string.IsNullOrWhiteSpace(fallbackPath) && File.Exists(fallbackPath))
+            {
+                using var image=System.Drawing.Image.FromFile(fallbackPath);
+                return new Bitmap(image);
+            }
+        }
+        catch(Exception){}
+        return null;
+    }
+
+    private static void ApplyTaggedLabelColors(Control parent)
+    {
+        foreach(Control child in parent.Controls)
+        {
+            if(child is Label label && label.Tag is Color color)label.ForeColor=color;
+            if(child.HasChildren)ApplyTaggedLabelColors(child);
+        }
     }
 
     public static string TypeName(ObjectType type)=>type switch

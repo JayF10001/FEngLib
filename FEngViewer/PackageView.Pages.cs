@@ -87,7 +87,7 @@ public partial class PackageView
             var baselineInfo = string.Equals(baseline, file.Project.Index.SourcePath, StringComparison.OrdinalIgnoreCase)
                 ? ""
                 : $"\r\n\r\n工程基线：\r\n{baseline}";
-            _workspaceInfo.Text = $"文件名：{file.Caption}\r\n\r\n源容器：\r\n{file.Project.Index.SourcePath}{baselineInfo}\r\n\r\n" +
+            _workspaceInfo.Text = $"文件名：{file.Caption}\r\n\r\n来源容器：\r\n{file.Project.Index.SourcePath}{baselineInfo}\r\n\r\n" +
                 $"逻辑偏移：0x{file.Block.Offset:X8}\r\n块大小：{file.Block.TotalLength:N0} 字节\r\n" +
                 $"对象数量：{_previewDocument.Package.Objects.Count}\r\n\r\n文档状态：{state}" +
                 "\r\n\r\n预览只读；双击左侧文件进入编辑。";

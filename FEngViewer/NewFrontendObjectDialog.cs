@@ -41,7 +41,7 @@ internal sealed class NewFrontendObjectDialog:Form
             var n=ObjectName; var h=Hashing.BinHash(n); hash.Text=$"0x{h:X8}";
             var valid=n.Length>0 && n.All(c=>c>32 && c<127 && c!='"');
             var duplicate=package.Objects.Any(o=>o.NameHash==h || string.Equals(o.Name,n,StringComparison.OrdinalIgnoreCase));
-            error.Text=!valid?"请输入 ASCII 名称，不含空格和双引号。":duplicate?"此名称或哈希已经存在。":"使用包内已有资源；不会向游戏添加纹理。";
+            error.Text=!valid?"请输入 ASCII 名称，不含空格和双引号。":duplicate?"此名称或哈希已经存在。":"使用包内已有资源；不会向游戏添加贴图。";
             ok.Enabled=valid&&!duplicate;
         }
         kind.SelectedIndexChanged+=(_,_)=>

@@ -22,8 +22,8 @@ internal sealed class ContainerBrowser : Form
     private bool _outputEdited;
 
     private readonly TextBox _containerPath = new() { Dock = DockStyle.Fill, ReadOnly = true };
-    private readonly Button _browseContainer = new() { Text = "Browse...", AutoSize = true };
-    private readonly TextBox _filter = new() { Dock = DockStyle.Fill, PlaceholderText = "按名称过滤 FNG..." };
+    private readonly Button _browseContainer = new() { Text = "浏览…", AutoSize = true };
+    private readonly TextBox _filter = new() { Dock = DockStyle.Fill, PlaceholderText = "按名称过滤 FNG" };
     private readonly Label _filterCount = new() { AutoSize = true, TextAlign = ContentAlignment.MiddleRight };
     private readonly ListView _entries = new()
     {
@@ -35,13 +35,13 @@ internal sealed class ContainerBrowser : Form
         HeaderStyle = ColumnHeaderStyle.Nonclickable
     };
     private readonly TextBox _output = new() { Dock = DockStyle.Fill };
-    private readonly Button _browseOutput = new() { Text = "Browse...", AutoSize = true };
+    private readonly Button _browseOutput = new() { Text = "浏览…", AutoSize = true };
     private readonly ComboBox _existing = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 190 };
     private readonly Label _policyHint = new() { AutoSize = true, MaximumSize = new Size(560, 0) };
     private readonly Label _status = new() { Dock = DockStyle.Fill, AutoSize = true, MaximumSize = new Size(980, 0) };
-    private readonly Button _extractSelected = new() { Text = "Extract Selected & Open", AutoSize = true, Enabled = false };
-    private readonly Button _extractAll = new() { Text = "Extract All & Open Tabs", AutoSize = true, Enabled = false };
-    private readonly Button _cancel = new() { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
+    private readonly Button _extractSelected = new() { Text = "提取选中项并打开", AutoSize = true, Enabled = false };
+    private readonly Button _extractAll = new() { Text = "提取全部并打开标签", AutoSize = true, Enabled = false };
+    private readonly Button _cancel = new() { Text = "取消", AutoSize = true, DialogResult = DialogResult.Cancel };
     private readonly Button _binaryRuntime = new() { Text = "配置 Binary…", AutoSize = true };
 
     public string ExtractionSummary { get; private set; }
@@ -56,25 +56,25 @@ internal sealed class ContainerBrowser : Form
     {
         _sourcePath = sourcePath;
         _importFiles = importFiles ?? throw new ArgumentNullException(nameof(importFiles));
-        Text = "Container FNGs — " + Path.GetFileName(sourcePath);
+        Text = "容器 FNG · " + Path.GetFileName(sourcePath);
         StartPosition = FormStartPosition.CenterParent;
         Size = new Size(1000, 620);
         MinimumSize = new Size(760, 460);
         ShowInTaskbar = false;
         Shown += (_,_) => EditorTheme.Apply(this);
 
-        _entries.Columns.Add("Name", 280);
-        _entries.Columns.Add("Type", 100);
-        _entries.Columns.Add("Size", 90);
-        _entries.Columns.Add("Status", 300);
+        _entries.Columns.Add("名称", 280);
+        _entries.Columns.Add("类型", 100);
+        _entries.Columns.Add("大小", 90);
+        _entries.Columns.Add("状态", 300);
 
-        _existing.Items.AddRange(new object[] { "停止提取（不覆盖）", "跳过已有文件", "覆盖已有文件" });
+        _existing.Items.AddRange(new object[] { "停止提取（不覆盖）", "跳过已有文件", "覆盖同名文件" });
         _existing.SelectedIndexChanged += (_, _) =>
         {
             _policyHint.Text = _existing.SelectedIndex switch
             {
                 1 => "保留输出目录中已有的 FNG 与来源记录，并把已有 FNG 一起加入工作区。",
-                2 => "用容器中的原始 FNG 替换输出文件及来源记录，已有编辑会被覆盖。",
+                2 => "用来源容器中的原始 FNG 替换输出文件及来源记录，已有编辑会被覆盖。",
                 _ => "发现同名 FNG 或来源记录时，停止整批提取，不写入任何文件。"
             };
         };
@@ -84,18 +84,18 @@ internal sealed class ContainerBrowser : Form
         for (var i = 0; i < 8; i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles[3] = new RowStyle(SizeType.Percent, 100);
 
-        layout.Controls.Add(BuildPathRow("Container:", _containerPath, _browseContainer), 0, 0);
+        layout.Controls.Add(BuildPathRow("来源容器：", _containerPath, _browseContainer), 0, 0);
         layout.Controls.Add(BuildFilterRow(), 0, 1);
         layout.Controls.Add(_status, 0, 2);
         layout.Controls.Add(_entries, 0, 3);
-        layout.Controls.Add(BuildPathRow("Output folder:", _output, _browseOutput), 0, 4);
+        layout.Controls.Add(BuildPathRow("输出文件夹：", _output, _browseOutput), 0, 4);
         layout.Controls.Add(BuildPolicyRow(), 0, 5);
         layout.Controls.Add(new Label
         {
             AutoSize = true,
             MaximumSize = new Size(960, 0),
             ForeColor = SystemColors.GrayText,
-            Text = "提取只写入工作副本，不会写回容器或游戏目录。"
+            Text = "提取只写入工作副本，不会修改来源容器或游戏目录。"
         }, 0, 6);
         layout.Controls.Add(BuildButtonRow(), 0, 7);
         Controls.Add(layout);
@@ -151,7 +151,7 @@ internal sealed class ContainerBrowser : Form
     private Control BuildPolicyRow()
     {
         var panel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, Margin = new Padding(0, 2, 0, 4) };
-        panel.Controls.Add(new Label { Text = "If file exists:", AutoSize = true, Margin = new Padding(0, 6, 8, 0) });
+        panel.Controls.Add(new Label { Text = "同名文件：", AutoSize = true, Margin = new Padding(0, 6, 8, 0) });
         panel.Controls.Add(_existing);
         panel.Controls.Add(_policyHint);
         return panel;
@@ -180,13 +180,13 @@ internal sealed class ContainerBrowser : Form
     {
         using var dialog = new OpenFileDialog
         {
-            Filter = "MW05 containers (*.bun, *.lzc)|*.bun;*.lzc",
+            Filter = "MW05 容器 (*.bun, *.lzc)|*.bun;*.lzc",
             CheckFileExists = true,
             FileName = _sourcePath
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         _sourcePath = dialog.FileName;
-        Text = "Container FNGs — " + Path.GetFileName(_sourcePath);
+        Text = "容器 FNG · " + Path.GetFileName(_sourcePath);
         await Scan();
     }
 
@@ -204,7 +204,7 @@ internal sealed class ContainerBrowser : Form
     private async Task Scan()
     {
         SetBusy(true);
-        _status.Text = "正在扫描容器（只读）...";
+        _status.Text = "正在扫描容器（只读）";
         _container = null;
         _entries.Items.Clear();
         UpdateButtons();
@@ -216,8 +216,8 @@ internal sealed class ContainerBrowser : Form
             _containerPath.Text = _sourcePath;
             if (!_outputEdited || string.IsNullOrWhiteSpace(_output.Text)) SetOutput(DefaultOutput(container));
             Populate();
-            _status.Text = $"{container.Entries.Count} 个 FNG 块，{container.Entries.Count(entry => entry.CanExtract)} 个可原样提取。" +
-                           "压缩块需要解压实现，本轮不支持；损坏条目会在结果中说明原因。";
+            _status.Text = $"总计 {container.Entries.Count} 个 FNG 块 · 可提取 {container.Entries.Count(entry => entry.CanExtract)} 个。" +
+                           "压缩块暂不支持；损坏条目会在结果中说明原因。";
         }
         catch (Exception error)
         {
@@ -255,14 +255,14 @@ internal sealed class ContainerBrowser : Form
                     name,
                     entry.Storage switch
                     {
-                        FngStorageKind.Uncompressed => "Uncompressed",
-                        FngStorageKind.Compressed => "Compressed",
-                        _ => "Invalid"
+                        FngStorageKind.Uncompressed => "未压缩",
+                        FngStorageKind.Compressed => "压缩",
+                        _ => "损坏"
                     },
                     FormatSize(entry.StoredLength),
                     entry.Storage switch
                     {
-                        FngStorageKind.Uncompressed => "OK",
+                        FngStorageKind.Uncompressed => "可提取",
                         FngStorageKind.Compressed => entry.Diagnostic ?? "压缩：暂不支持",
                         _ => entry.Diagnostic ?? "损坏"
                     }
@@ -273,13 +273,13 @@ internal sealed class ContainerBrowser : Form
                         : entry.Storage == FngStorageKind.Compressed ? SystemColors.GrayText : Color.FromArgb(186, 40, 30)
                 };
 
-                item.ToolTipText = $"0x{entry.Offset:X}  {entry.StoredLength:N0} 字节" +
+                item.ToolTipText = $"0x{entry.Offset:X} · {entry.StoredLength:N0} 字节" +
                                    (string.IsNullOrEmpty(entry.Diagnostic) ? "" : "\n" + entry.Diagnostic);
                 _entries.Items.Add(item);
                 shown++;
             }
 
-            _filterCount.Text = $"共 {_container.Entries.Count}，显示 {shown}";
+            _filterCount.Text = $"总计 {_container.Entries.Count} 个 FNG 块 · 显示 {shown} 个";
         }
         finally
         {
@@ -289,9 +289,12 @@ internal sealed class ContainerBrowser : Form
         UpdateButtons();
     }
 
-    private static string FormatSize(long bytes) => bytes >= 1024 * 1024
-        ? $"{bytes / 1048576.0:0.0} MB"
-        : $"{Math.Max(1, bytes / 1024.0):0} KB";
+    private static string FormatSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes:N0} 字节";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
+        return $"{bytes / 1048576.0:0.#} MB";
+    }
 
     private void UpdateButtons()
     {
@@ -324,14 +327,14 @@ internal sealed class ContainerBrowser : Form
         if (selection.Length == 0)
         {
             MessageBox.Show(this, allEntries ? "容器中没有可原样提取的 FNG。" : "请选择至少一个可提取的 FNG。",
-                "Extract", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                "提取", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
         var directory = _output.Text?.Trim();
         if (string.IsNullOrWhiteSpace(directory))
         {
-            MessageBox.Show(this, "请先选择输出文件夹。", "Extract", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "请先选择输出文件夹。", "提取", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
@@ -341,7 +344,7 @@ internal sealed class ContainerBrowser : Form
         }
         catch (Exception error)
         {
-            MessageBox.Show(this, error.Message, "Extract", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, error.Message, "提取", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
         ExtractionOutputDirectory = directory;

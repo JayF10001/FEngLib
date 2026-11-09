@@ -85,7 +85,7 @@ internal sealed class WriteBackPreviewDialog : Form
             lines.Add("");
         }
 
-        lines.Add($"原始容器（只读基线）: {plan.OriginalPath}");
+        lines.Add($"来源容器（只读）: {plan.OriginalPath}");
         lines.Add($"{(plan.PublishNewCopy ? "新容器副本" : "工作副本（写回目标）")}: {plan.WorkingCopyPath ?? "(尚未创建)"}");
         lines.Add($"输入 SHA256        : {plan.WorkingCopySha256 ?? "—"}");
         lines.Add($"备份位置           : {plan.BackupPath ?? "—"}");
@@ -108,7 +108,7 @@ internal sealed class WriteBackPreviewDialog : Form
             lines.Add(plan.RebuildWithBinary
                 ? "重建会调整块偏移、填充和 TPK 编码；逐一核对 FNG，检查贴图像素、属性及其他资源。"
                 : "非目标块（含填充与压缩块）逐字节保留，所有块偏移不变。");
-            lines.Add("原始容器与游戏目录不会被修改；未通过候选验证不会发布。");
+            lines.Add("来源容器与游戏目录不会被修改；未通过候选验证不会发布。");
         }
         foreach (var note in plan.Notes) lines.Add("  · " + note);
         return string.Join(Environment.NewLine, lines);

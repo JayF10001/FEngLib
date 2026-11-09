@@ -87,7 +87,7 @@ internal sealed class ContainerWriteBackCoordinator
                 ContainerSession.PathsEqual(save.TargetPath, session.WorkingCopyPath) ||
                 ContainerSession.PathsEqual(save.TargetPath, ContainerSession.SessionFilePath(session.SessionDirectory)) ||
                 ContainerSession.PathsEqual(save.TargetPath, WriteBackJournal.JournalFilePath(session.SessionDirectory)))
-                throw new InvalidOperationException("FNG 保存目标不能覆盖原始容器、工作副本或写回记录。");
+                throw new InvalidOperationException("FNG 保存目标不能覆盖来源容器、工作副本或写回记录。");
             if (save.IsJson) return; // JSON is an independent export, never a binary replacement
             var otherSession = SessionForFile(save.TargetPath);
             var otherBinding = FindBinding(otherSession, save.TargetPath);

@@ -120,15 +120,20 @@ public partial class PackageView
         }
     }
 
-    private ContainerTextureOverride CreateTextureOverride(ResourceRequest request, byte[] pngData,
-        string sourceName, TextureLookupResult underlying)
+    private ContainerTextureOverride CreateTextureOverride(ResourceRequest request, byte[] data,
+        string sourceName, TextureInputKind inputKind, TextureLookupResult underlying)
     {
         var document = _boundDocument ?? ActiveDocument;
         if (request == null || !IsContainerEditDocument() || document?.Block == null)
             throw new InvalidOperationException("当前不是容器 FNG 编辑标签。");
         var entry = underlying?.Entry;
+        if (inputKind == TextureInputKind.Dds)
+            return ContainerTextureOverride.CreateDds(document.Block.Offset, request.ID,
+                request.Name ?? "", sourceName, data, entry?.ArchivePath, entry?.TpkName,
+                entry?.TpkOrdinal ?? -1, entry?.TextureOrdinal ?? -1, entry?.Name, entry?.BinKey ?? 0,
+                entry?.Compression, entry?.Width ?? 0, entry?.Height ?? 0, entry?.MipCount ?? -1);
         return ContainerTextureOverride.Create(document.Block.Offset, request.ID, request.Name ?? "",
-            sourceName, pngData, entry?.ArchivePath, entry?.TpkName, entry?.TpkOrdinal ?? -1,
+            sourceName, data, entry?.ArchivePath, entry?.TpkName, entry?.TpkOrdinal ?? -1,
             entry?.TextureOrdinal ?? -1, entry?.Name, entry?.BinKey ?? 0, entry?.Compression);
     }
 
@@ -144,15 +149,15 @@ public partial class PackageView
     private string WriteTextureCopy(ContainerTextureOverride replacement, string targetPath)
     {
         if (_containerProject == null || replacement == null || !replacement.HasTarget)
-            return "没有可写回的 TPK 目标。";
+            return "没有可导出的 TPK 目标。";
         var sourcePath = replacement.TargetArchivePath;
         if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
-            return "目标档案不存在，无法写回。";
+            return "目标档案不存在，无法导出贴图档案副本。";
         if (ContainerSession.PathsEqual(sourcePath, targetPath))
-            return "输出副本不能覆盖目标档案。";
+            return "输出档案不能覆盖目标档案。";
         var compression = replacement.TargetCompression?.ToUpperInvariant();
         if (compression is not ("TEXCOMP_DXTC1" or "TEXCOMP_DXTC3" or "TEXCOMP_DXTC5"))
-            return $"暂不支持写回格式：{replacement.TargetCompression}。";
+            return $"暂不支持导出格式：{replacement.TargetCompression}。";
         try
         {
             UseWaitCursor = true;
@@ -162,7 +167,7 @@ public partial class PackageView
                 using var sha = SHA256.Create();
                 var sourceHash = Convert.ToHexString(sha.ComputeHash(source));
                 if (!string.Equals(sourceHash, _containerProject.Index.SourceSha256, StringComparison.OrdinalIgnoreCase))
-                    return "源容器已改变，请重新打开容器工程。";
+                    return "来源容器已改变，请重新打开容器工程。";
             }
             var report = ContainerTextureWriteBack.Write(sourcePath, targetPath,
                 new[]
@@ -175,10 +180,15 @@ public partial class PackageView
                         TextureName = replacement.TargetTextureName,
                         BinKey = replacement.TargetBinKey,
                         Compression = replacement.TargetCompression,
-                        PngData = replacement.PngData,
+                        InputKind = replacement.InputKind,
+                        Data = replacement.Data,
+                        Format = replacement.Format,
+                        Width = replacement.Width,
+                        Height = replacement.Height,
+                        MipCount = replacement.MipCount,
                     }
                 });
-            _workspace.StatusMessage = $"已生成档案副本 · {Path.GetFileName(report.OutputPath)}";
+            _workspace.StatusMessage = $"已导出贴图档案副本 · {Path.GetFileName(report.OutputPath)}";
             SetFormDetails();
             return null;
         }
@@ -276,9 +286,9 @@ public partial class PackageView
             var objectName = selected?.Name;
             if (string.IsNullOrWhiteSpace(objectName)) objectName = $"0x{selected?.Guid:X8}";
             using var dialog = new TextureReplaceDialog(objectName, _boundDocument.CaptionName, request,
-                current, existing, _containerProject.BaselinePath, WriteTextureCopy,
+                current, underlying, existing, _containerProject.BaselinePath, WriteTextureCopy,
                 () => _textureResolver.Resolve(request),
-                (png, sourceName) => CreateTextureOverride(request, png, sourceName, underlying),
+                (data, sourceName, kind) => CreateTextureOverride(request, data, sourceName, kind, underlying),
                 ApplyTextureOverride,
                 () => RemoveTextureOverride(request));
             dialog.ShowDialog(this);
