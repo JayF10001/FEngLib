@@ -338,12 +338,14 @@ public partial class GLRenderControl
     }
     private void DrawEditorOverlay(Graphics graphics)
     {
-        if(_renderTree==null || graphics==null) return;
-        // GDIDraw runs after SharpGL presents the DIB. Keep editor chrome independent of
-        // texture, blend and matrix state left by the game preview renderer.
+        if(graphics==null) return;
+        // GDIDraw runs after SharpGL presents the DIB. The work area and canvas are already
+        // painted by GL, so this overlay only adds selection chrome and the canvas border.
         var state=graphics.Save();
         try
         {
+            if(_renderTree!=null)
+            {
             graphics.SetClip(PreviewViewport);
             graphics.SmoothingMode=SmoothingMode.AntiAlias;
             PointF[] ScreenPolygon(RenderTreeNode node)=>RenderGeometry.Polygon(node).Select(FeToScreen).ToArray();
@@ -427,9 +429,56 @@ public partial class GLRenderControl
                         graphics.DrawString(n.GetObject().Name??$"{n.GetObject().NameHash:X8}",Font,brush,p);
                     }
                 }
+            }
         }
         finally { graphics.Restore(state); }
+        DrawCanvasBorder(graphics);
     }
+
+    /// <summary>One device-independent pixel; maps to one physical pixel at 100% DPI.</summary>
+    private int CanvasBorderWidth => Math.Max(1, (int)Math.Round(DeviceDpi / 96f));
+
+    /// <summary>
+    /// Screen rectangle occupied by the actual FNG canvas at the current zoom and pan. The GL
+    /// viewport is only the clipping window; at anything other than fit it is larger than the
+    /// scaled canvas, so chrome must follow this rectangle instead of the viewport.
+    /// </summary>
+    private Rectangle CanvasBounds
+    {
+        get
+        {
+            var viewport = PreviewViewport;
+            if (_fit && _pan.X == 0 && _pan.Y == 0) return viewport;
+
+            var canvas = PreviewLayout.CanvasSize(_previewAspect);
+            var scale = Zoom;
+            var width = Math.Max(1, (int)Math.Round(canvas.Width * scale));
+            var height = Math.Max(1, (int)Math.Round(canvas.Height * scale));
+            var centerX = viewport.Left + viewport.Width / 2f + _pan.X;
+            var centerY = viewport.Top + viewport.Height / 2f + _pan.Y;
+            return new Rectangle(
+                (int)Math.Round(centerX - width / 2f),
+                (int)Math.Round(centerY - height / 2f),
+                width, height);
+        }
+    }
+
+    /// <summary>Part of the canvas that is actually visible inside the fixed-ratio GL viewport.</summary>
+    private Rectangle CanvasClip => Rectangle.Intersect(CanvasBounds, PreviewViewport);
+
+    private void DrawCanvasBorder(Graphics graphics)
+    {
+        var viewport = CanvasClip;
+        if (viewport.Width < 2 || viewport.Height < 2) return;
+        graphics.SmoothingMode = SmoothingMode.None;
+        graphics.PixelOffsetMode = PixelOffsetMode.Half;
+        using var pen = new Pen(CanvasBackdrop.Border, CanvasBorderWidth)
+        {
+            Alignment = PenAlignment.Inset
+        };
+        graphics.DrawRectangle(pen, viewport.X, viewport.Y, viewport.Width - 1, viewport.Height - 1);
+    }
+
     private void UpdatePreviewFrame()
     {
         if(_renderer==null) return;

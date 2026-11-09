@@ -20,6 +20,8 @@ public partial class PackageView
     private readonly Dictionary<(WorkspaceDocument,bool),(string[] Expanded,string Top,string Selected)> _treeViews=new();
     private ToolStrip _canvasTools;
     private ToolStripComboBox _zoomChoice;
+    private ToolStripComboBox _backdropChoice;
+    private WorkspaceBackdrop _workspaceBackdrop = WorkspaceBackdrop.DeepGray;
     private bool _syncingZoom;
     private readonly List<ToolStripButton> _toolButtons=new();
     private ToolStripButton _packagePlayButton,_packagePauseButton,_packageResetButton;
@@ -203,6 +205,17 @@ public partial class PackageView
         zoom.SelectedIndexChanged+=(_,_)=>{if(!_syncingZoom && float.TryParse(zoom.Text.TrimEnd('%'),out var v))viewOutput.SetZoom(v/100);};
         _canvasTools.Items.Add(zoom);
         _canvasTools.Items.Add(new ToolStripSeparator());
+        _canvasTools.Items.Add(new ToolStripLabel("背景"));
+        _backdropChoice=new ToolStripComboBox{Name="canvasBackdropCombo",AccessibleName="背景",
+            AutoSize=false,Width=Math.Max(78,LogicalToDeviceUnits(92)),
+            DropDownStyle=ComboBoxStyle.DropDownList,
+            ToolTipText="工作区背景；实际 FNG 画布固定为黑色"};
+        foreach(var backdrop in new[]{WorkspaceBackdrop.DeepGray,WorkspaceBackdrop.Black,WorkspaceBackdrop.Checkerboard})
+            _backdropChoice.Items.Add(CanvasBackdrop.DisplayName(backdrop));
+        _backdropChoice.SelectedIndex=0;
+        _backdropChoice.SelectedIndexChanged+=(_,_)=>ApplyWorkspaceBackdrop();
+        _canvasTools.Items.Add(_backdropChoice);
+        _canvasTools.Items.Add(new ToolStripSeparator());
         foreach(var label in new[]{"网格","外框","名称","组范围"})
         {
             var b=new ToolStripButton(label){CheckOnClick=true};b.CheckedChanged+=(_,_)=>
@@ -211,6 +224,17 @@ public partial class PackageView
         }
         _innerSplit.Panel1.Controls.Add(_canvasTools);_canvasTools.SendToBack();
         UpdatePackagePreviewControls();
+    }
+    private void ApplyWorkspaceBackdrop()
+    {
+        if(_backdropChoice==null)return;
+        _workspaceBackdrop=_backdropChoice.SelectedIndex switch
+        {
+            1=>WorkspaceBackdrop.Black,
+            2=>WorkspaceBackdrop.Checkerboard,
+            _=>WorkspaceBackdrop.DeepGray
+        };
+        viewOutput.Backdrop=_workspaceBackdrop;
     }
     private void UpdatePackagePreviewControls()
     {

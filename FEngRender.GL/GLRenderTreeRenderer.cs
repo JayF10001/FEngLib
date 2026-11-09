@@ -93,12 +93,18 @@ public class GLRenderTreeRenderer
     /// Renders nodes from a <see cref="RenderTree"/> to a surface.
     /// </summary>
     /// <param name="tree">The <see cref="RenderTree"/> to render.</param>
-    public void Render(RenderTree tree)
+    public void Render(RenderTree tree) => Render(tree, true);
+
+    /// <summary>
+    /// <paramref name="clear"/> is false when the caller has already painted a layered background
+    /// (for example the editor's black canvas over a work-area colour).
+    /// </summary>
+    public void Render(RenderTree tree, bool clear)
     {
         // FNG layers use painter order (GetZ below), not the depth buffer. SharpGL enables
         // depth testing by default; its resized DIB surface can otherwise occlude every layer.
         _gl.Disable(OpenGL.GL_DEPTH_TEST);
-        _gl.Clear(OpenGL.GL_COLOR_BUFFER_BIT | OpenGL.GL_DEPTH_BUFFER_BIT);
+        if (clear) _gl.Clear(OpenGL.GL_COLOR_BUFFER_BIT | OpenGL.GL_DEPTH_BUFFER_BIT);
         _gl.LoadIdentity();
 
         var dt = (int)(_stopwatch.ElapsedMilliseconds - _lastRenderTime);

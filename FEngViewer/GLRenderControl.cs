@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Numerics;
 using System.Windows.Forms;
 using FEngLib.Assets;
 using FEngLib.Structures;
@@ -20,6 +21,8 @@ public partial class GLRenderControl : UserControl, IRenderControl
     [CanBeNull] private RenderTree _renderTree;
     private PreviewAspectRatio _previewAspect = PreviewAspectRatio.Standard4x3;
     private Rectangle _previewViewport = new(0, 0, PreviewLayout.LogicalWidth, PreviewLayout.LogicalHeight);
+    private WorkspaceBackdrop _backdrop = WorkspaceBackdrop.DeepGray;
+    private Color4 _canvasBackground = new(0, 0, 0, 255);
 
     public GLRenderControl()
     {
@@ -27,10 +30,28 @@ public partial class GLRenderControl : UserControl, IRenderControl
 
         // Let the GL surface line up exactly with this control so mouse coordinates map 1:1.
         openglControl1.Margin = Padding.Empty;
+        BackColor = Color.Black;
+        openglControl1.BackColor = Color.Black;
         Resize += (_, _) => UpdatePreviewViewport();
         UpdatePreviewViewport();
         InitializeEditorInput();
         openglControl1.GDIDraw += (_, args) => DrawEditorOverlay(args.Graphics);
+    }
+
+    /// <summary>
+    /// Work-area backdrop outside the actual FNG canvas. The canvas stays black in every mode; the
+    /// light seam is drawn by the editor overlay. Changing this never touches FNG data.
+    /// </summary>
+    public WorkspaceBackdrop Backdrop
+    {
+        get => _backdrop;
+        set
+        {
+            if (!Enum.IsDefined(typeof(WorkspaceBackdrop), value)) value = WorkspaceBackdrop.DeepGray;
+            if (_backdrop == value) return;
+            _backdrop = value;
+            RequestFrame();
+        }
     }
 
     /// <summary>Raised when the letterbox rectangle changes, so the status strip can show the scale.</summary>
@@ -59,7 +80,12 @@ public partial class GLRenderControl : UserControl, IRenderControl
 
     public Color4 BackgroundColor
     {
-        set => _renderer?.SetBackgroundColor(value);
+        set
+        {
+            _canvasBackground = value;
+            _renderer?.SetBackgroundColor(value);
+            RequestFrame();
+        }
     }
 
     public RenderTreeNode SelectedNode
@@ -137,12 +163,78 @@ public partial class GLRenderControl : UserControl, IRenderControl
             return;
         }
 
+        UpdatePreviewViewport();
+        // Paint both layers before the FNG content. The renderer must not clear afterwards or it
+        // would erase the work area; content that extends past the canvas stays visible on top.
+        DrawSceneBackground(gl);
         ApplyViewport(gl);
         UpdatePreviewFrame();
         if (_renderTree != null)
-            _renderer.Render(_renderTree);
-        else
-            gl.Clear(SharpGL.OpenGL.GL_COLOR_BUFFER_BIT | SharpGL.OpenGL.GL_DEPTH_BUFFER_BIT);
+            _renderer.Render(_renderTree, false);
+    }
+
+    /// <summary>
+    /// Clears the whole surface with the work-area colour, then the actual canvas with its own
+    /// colour through a scissor rectangle. No GDI fill is used, so FNG layers outside the canvas
+    /// still render above the work area instead of being covered by editor chrome.
+    /// </summary>
+    private void DrawSceneBackground(SharpGL.OpenGL gl)
+    {
+        var client = openglControl1.ClientSize;
+        var width = Math.Max(1, client.Width);
+        var height = Math.Max(1, client.Height);
+        gl.Viewport(0, 0, width, height);
+        gl.Disable(SharpGL.OpenGL.GL_SCISSOR_TEST);
+
+        var workspace = _backdrop == WorkspaceBackdrop.Black ? Color.Black : CanvasBackdrop.Workspace;
+        gl.ClearColor(workspace.R / 255f, workspace.G / 255f, workspace.B / 255f, 1f);
+        gl.Clear(SharpGL.OpenGL.GL_COLOR_BUFFER_BIT | SharpGL.OpenGL.GL_DEPTH_BUFFER_BIT);
+
+        if (_backdrop == WorkspaceBackdrop.Checkerboard)
+            DrawWorkspaceCheckerboard(gl, width, height);
+
+        var canvas = CanvasClip;
+        if (canvas.Width <= 0 || canvas.Height <= 0) return;
+        gl.Enable(SharpGL.OpenGL.GL_SCISSOR_TEST);
+        gl.Scissor(canvas.X, height - canvas.Bottom, canvas.Width, canvas.Height);
+        var background = (Vector4)_canvasBackground;
+        gl.ClearColor(background.X, background.Y, background.Z, background.W);
+        gl.Clear(SharpGL.OpenGL.GL_COLOR_BUFFER_BIT);
+        gl.Disable(SharpGL.OpenGL.GL_SCISSOR_TEST);
+    }
+
+    /// <summary>
+    /// Alternating dark cells for the transparent-material backdrop. Drawn in screen space before
+    /// content, so textures/layers remain fully visible and the board never acts as a mask.
+    /// </summary>
+    private void DrawWorkspaceCheckerboard(SharpGL.OpenGL gl, int width, int height)
+    {
+        var cell = Math.Max(6, (int)Math.Round(12 * DeviceDpi / 96f));
+        gl.Disable(SharpGL.OpenGL.GL_TEXTURE_2D);
+        gl.Disable(SharpGL.OpenGL.GL_BLEND);
+        gl.Disable(SharpGL.OpenGL.GL_CULL_FACE);
+        gl.Disable(SharpGL.OpenGL.GL_SCISSOR_TEST);
+        gl.MatrixMode(MatrixMode.Projection);
+        gl.LoadIdentity();
+        gl.Ortho(0, width, height, 0, -1, 1);
+        gl.MatrixMode(MatrixMode.Modelview);
+        gl.LoadIdentity();
+
+        var alternate = CanvasBackdrop.CheckerAlternate;
+        gl.Color(alternate.R / 255f, alternate.G / 255f, alternate.B / 255f, 1f);
+        gl.Begin(SharpGL.OpenGL.GL_QUADS);
+        for (var y = 0; y < height; y += cell)
+        for (var x = 0; x < width; x += cell)
+        {
+            if ((((x / cell) + (y / cell)) & 1) == 0) continue;
+            gl.Vertex(x, y);
+            gl.Vertex(x + cell, y);
+            gl.Vertex(x + cell, y + cell);
+            gl.Vertex(x, y + cell);
+        }
+
+        gl.End();
+        gl.Color(1f, 1f, 1f, 1f);
     }
 
     /// <summary>
