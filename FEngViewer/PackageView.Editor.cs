@@ -164,6 +164,8 @@ public partial class PackageView
             "Esc：取消拖动或输入；Ctrl+Z/Y：撤销/重做\n"+
             "布局变换同步作用于全部已有脚本。开始编辑会回到 INIT 第 0 帧。\n"+
             "高级页可编辑原始字段。文件保存与容器写回不属于撤销范围。","操作说明"));
+        help.DropDownItems.Add(new ToolStripSeparator());
+        help.DropDownItems.Add("关于 FEngEditor…",null,(_,_)=>ShowAbout());
         menuStrip1.Items.AddRange(new ToolStripItem[]{edit,objects,view,help});
         BuildCanvasTools();
         var createContext=new ToolStripMenuItem("新建对象…",null,(_,_)=>CreateObject());
@@ -637,5 +639,11 @@ public partial class PackageView
             }
         }
         return null;
+    }
+
+    private void ShowAbout()
+    {
+        using var dialog = new AboutDialog(Icon);
+        dialog.ShowDialog(this);
     }
 }
